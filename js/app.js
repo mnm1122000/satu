@@ -1,7 +1,7 @@
 // SATU! — app: screens, host loop, client flow, dealing & card animations.
-import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, CATCH_GRACE, canPlay, cardName } from './engine.js?v=2';
-import * as net from './net.js?v=2';
-import { sfx, vibrate } from './sfx.js?v=2';
+import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, CATCH_GRACE, canPlay, cardName } from './engine.js?v=3';
+import * as net from './net.js?v=3';
+import { sfx, vibrate } from './sfx.js?v=3';
 
 // ======================================================================
 // utils
@@ -416,6 +416,7 @@ function teardown() {
   if (App.bus) App.bus.close();
   Object.assign(App, { mode: null, code: null, me: null, bus: null, game: null, view: null, pubs: {}, keyP: {}, chain: {}, seen: {}, lastSent: {}, ident: null, hostKey: null, bTimer: null });
   App.hidden.clear();
+  recvClear();
   closeModal();
   netBanner(null);
   setScreen('home');
@@ -444,6 +445,8 @@ function applyView(v) {
   // the hand never shows a card that is still flying in, but forget stale ids
   const ids = new Set(v.me.hand.map((c) => c.id));
   for (const id of App.hidden) if (!ids.has(id)) App.hidden.delete(id);
+  App.recvQ = App.recvQ.filter((c) => ids.has(c.id));
+  if (!App.recvQ.length && $('#recv') && !App.recvBusy) $('#recv').remove();
   render();
   syncModal(v);
   micSync();
@@ -465,7 +468,7 @@ function seatPt(pid) {
   const el = document.querySelector(`[data-seat="${CSS.escape(pid)}"] .av`);
   return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.2, w: 40 };
 }
-const deckPt = () => { const el = $('#deck .card.top'); return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.3, w: 64 }; };
+const deckPt = () => { const el = $('#bigdeck .card') || $('#deck .card.top'); return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.3, w: 64 }; };
 const pilePt = () => { const el = $('#pile'); return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.3, w: 64 }; };
 function handEndPt() {
   const hand = $('#hand');
@@ -591,7 +594,7 @@ function onFx(e) {
           for (let k = 1; k <= v.players.length; k++) { const j = (i + k) % v.players.length; if (v.dealing.need[j] > 0) { v.dealing.to = v.players[j].id; break; } }
         }
       }
-      if (e.to === me && e.card && !v.me.hand.some((c) => c.id === e.card.id)) { v.me.hand.push(e.card); App.hidden.add(e.card.id); }
+      if (e.to === me && e.card && !v.me.hand.some((c) => c.id === e.card.id)) { v.me.hand.push(e.card); if (!isDealer) App.hidden.add(e.card.id); }
       render();
       animDeal(e, isDealer);
       break;
@@ -667,38 +670,104 @@ function onFx(e) {
 function animDeal(e, isDealer) {
   const me = App.me;
   const d = deckPt();
-  if (e.to === me) {
-    if (isDealer) sfx.play('trrr');
-    sfx.play('receive', { delay: isDealer ? 0.12 : 0 });
-    vibrate(25);
-    const end = handEndPt();
-    const W = innerWidth, startX = W / 2 + (Math.random() - 0.5) * 30;
-    const pts = isDealer
-      ? [{ x: d.x, y: d.y, s: d.w / end.w }, { x: W / 2, y: innerHeight * 0.5, s: 1.5, r: -4 }, { x: end.x, y: end.y, s: 1 }]
-      : [{ x: startX, y: -end.w * 1.2, r: -14, s: 1.4 }, { x: W / 2, y: innerHeight * 0.45, s: 1.7, r: 3 }, { x: W / 2, y: innerHeight * 0.45, s: 1.7, r: 0 }, { x: end.x, y: end.y, s: 1 }];
-    fly({ card: null, pts, w: end.w, dur: isDealer ? 620 : 900, flipTo: e.card || null, flipAt: isDealer ? 0.45 : 0.42, offsets: isDealer ? null : [0, 0.35, 0.62, 1],
-      onEnd: () => { if (e.card) App.hidden.delete(e.card.id); paintHand(); } });
-    return;
-  }
   if (isDealer) {
-    // flick it forward: off the top of the host's phone, leaning towards the player's seat
+    // the big card shoots off the top of the host's phone (towards the phone touching it)
     sfx.play('trrr');
     vibrate(12);
-    const s = seatPt(e.to);
-    const phone = App.view.dealing && App.view.dealing.mode === 'phone';
-    const lean = phone ? 0 : (s.x - d.x) / innerWidth;
     const f = App.flickFrom && Date.now() - App.flickFrom.at < 600 ? App.flickFrom : null;
     App.flickFrom = null;
-    const st = f ? { x: f.x, y: f.y, r: 0, s: 1.3 } : { x: d.x, y: d.y, r: 0 };
-    fly({ pts: [st, { x: st.x + lean * 60, y: st.y - 70, r: lean * 30, s: 1.3 }, { x: st.x + lean * 260, y: -160, r: lean * 60 + (Math.random() - 0.5) * 16, s: 1.4, o: 0.9 }],
-      w: d.w, dur: f ? 300 : 430, label: '→ ' + nameOf(e.to), ease: 'cubic-bezier(.4,.1,.6,1)' });
-    popSeat(e.to);
+    const st = f ? { x: f.x, y: f.y, r: 0, s: 1.05 } : { x: d.x, y: d.y, r: 0 };
+    const self = e.to === me;
+    if (self) App.hidden.delete(e.card && e.card.id);
+    const endY = self ? innerHeight + d.w * 1.6 : -d.w * 1.6;
+    fly({ card: null, pts: [st, { x: st.x, y: st.y + (self ? 40 : -60), r: (Math.random() - 0.5) * 6, s: 1.05 }, { x: st.x + (Math.random() - 0.5) * 40, y: endY, r: (Math.random() - 0.5) * 24, s: 1 }],
+      w: d.w, dur: f ? 320 : 460, label: '→ ' + nameOf(e.to), ease: 'cubic-bezier(.45,.05,.65,1)' });
     return;
   }
+  if (e.to === me) { recvPush(e.card); return; }
   // everyone else: a small card glides from the deck to that player's seat
   const s = seatPt(e.to);
   fly({ pts: [{ x: d.x, y: d.y }, { x: s.x, y: s.y, s: 0.5, r: 20 }], w: d.w, dur: 380, onEnd: () => popSeat(e.to) });
 }
+
+
+// ======================================================================
+// RECEIVING A DEALT CARD — it lands full screen, face down. Tap it: it flips over, drops into
+// your hand and the table comes back. Several cards wait in a pile until you flip them.
+// ======================================================================
+App.recvQ = [];
+function recvPush(card) {
+  if (!card || App.recvQ.some((c) => c.id === card.id)) return;
+  App.recvQ.push(card);
+  App.hidden.add(card.id);
+  sfx.play('receive');
+  vibrate(30);
+  let o = $('#recv');
+  if (!o) {
+    o = document.createElement('div');
+    o.id = 'recv';
+    o.innerHTML = `<div class="rtop">Card from the dealer</div><div class="rstage"><div class="rcard"></div></div><div class="rcount"></div><div class="rhint">Tap the card to flip it</div><button class="btn sm ghost rall">Flip all</button>`;
+    document.body.appendChild(o);
+    o.addEventListener('click', (ev) => { if (ev.target.closest('.rall')) flipAll(); else flipNext(); });
+    o.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200 });
+  }
+  const rc = o.querySelector('.rcard');
+  if (!rc.firstChild && !App.recvBusy) {
+    rc.innerHTML = cardHTML(null, 'big');
+    rc.animate([{ transform: 'translateY(-115vh) rotate(-10deg)' }, { transform: 'translateY(4vh) rotate(2deg)', offset: 0.8 }, { transform: 'translateY(0) rotate(0)' }], { duration: 560, easing: 'cubic-bezier(.2,.8,.3,1)' });
+  } else {
+    // another card lands on the waiting pile
+    const extra = document.createElement('div');
+    extra.className = 'rextra';
+    extra.innerHTML = cardHTML(null, 'big');
+    o.querySelector('.rstage').appendChild(extra);
+    extra.animate([{ transform: 'translateY(-115vh) rotate(-10deg)' }, { transform: 'translateY(0) rotate(3deg)' }], { duration: 480, easing: 'cubic-bezier(.2,.8,.3,1)' }).onfinish = () => extra.remove();
+  }
+  recvCount();
+}
+function recvCount() {
+  const o = $('#recv');
+  if (!o) return;
+  const n = App.recvQ.length;
+  o.querySelector('.rcount').textContent = n > 1 ? `+${n - 1} more waiting` : '';
+  o.querySelector('.rall').style.display = n > 1 ? '' : 'none';
+}
+function flipNext(fast = false) {
+  const o = $('#recv');
+  const card = App.recvQ[0];
+  if (!o || !card || App.recvBusy) return Promise.resolve();
+  App.recvBusy = true;
+  const rc = o.querySelector('.rcard');
+  if (!rc.firstChild) rc.innerHTML = cardHTML(null, 'big');
+  sfx.play('draw');
+  return new Promise((resolve) => {
+    rc.animate([{ transform: 'scaleX(1)' }, { transform: 'scaleX(0)' }], { duration: fast ? 90 : 140, fill: 'forwards' }).onfinish = () => {
+      rc.innerHTML = cardHTML(card, 'big');
+      rc.animate([{ transform: 'scaleX(0)' }, { transform: 'scaleX(1) scale(1.06)' }], { duration: fast ? 110 : 170, fill: 'forwards' }).onfinish = () => {
+        setTimeout(() => {
+          const last = App.recvQ.length === 1;
+          const r = rc.getBoundingClientRect();
+          const end = handEndPt();
+          const sc = end.w / r.width;
+          if (last) o.classList.add('fade');
+          rc.animate([{ transform: 'scale(1.06)' }, { transform: `translate(${end.x - (r.left + r.width / 2)}px, ${end.y - (r.top + r.height / 2)}px) scale(${sc})` }], { duration: fast ? 220 : 360, easing: 'cubic-bezier(.4,.1,.4,1)', fill: 'forwards' }).onfinish = () => {
+            App.recvQ.shift();
+            App.hidden.delete(card.id);
+            paintHand();
+            rc.getAnimations().forEach((a) => a.cancel());
+            rc.innerHTML = '';
+            App.recvBusy = false;
+            if (!App.recvQ.length) { o.remove(); }
+            else { rc.innerHTML = cardHTML(null, 'big'); recvCount(); }
+            resolve();
+          };
+        }, fast ? 120 : 420);
+      };
+    };
+  });
+}
+async function flipAll() { while (App.recvQ.length) { await flipNext(true); } }
+function recvClear() { App.recvQ = []; App.recvBusy = false; $('#recv')?.remove(); }
 
 function animPlay(e) {
   const me = App.me;
@@ -786,6 +855,7 @@ function render() {
   else if (App.screen === 'game' && App.view) html = rGame(App.view);
   else html = rHome();
   el.innerHTML = html;
+  fitHand();
   if (handScroll != null && $('#hand')) $('#hand').scrollLeft = handScroll;
   if ($('#qr')) drawQR();
 }
@@ -828,7 +898,7 @@ function rHome() {
       <div class="row"><input id="codeIn" class="field code-field" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false"><button class="btn blue" style="flex:0 0 auto" data-act="doJoin">Join</button></div>
       <div class="small" style="margin-top:8px">Or scan the QR code on the host's phone.</div>
     </div>`}
-    <div class="row" style="margin-top:12px"><button class="btn ghost" data-act="rules">📖 Rules</button><button class="btn ghost" data-act="testSound">🔊 Test sound</button></div>
+    <div class="row" style="margin-top:12px"><button class="btn ghost" data-act="rules">📖 Rules</button><button class="btn ghost" data-act="testSound">🔊 Sound</button><button class="btn ghost" data-act="micSetup">🎙 Mic</button></div>
     <div class="made">Made by mnm <span class="beta">BETA</span></div>
   </div>`;
 }
@@ -906,9 +976,27 @@ function pileHTML(v) {
   return `${cardHTML(v.top, App.pileHide === v.top.id ? 'invisible' : '').replace('class="card', `style="--rot:${rot}deg" class="card`)}${pill}`;
 }
 
+function rDealScreen(v) {
+  const d = v.dealing;
+  const phone = d.mode === 'phone';
+  const nm = esc(nameOf(d.to));
+  const hs = v.settings.handSize;
+  return `<div class="game dealscreen">${topbar(v, `Round ${v.round} · dealing · ${d.left} cards left`)}
+    <div class="chips modes"><span class="chip ${!phone ? 'on' : ''}" data-act="dealMode" data-v="round">🔄 Round the table</span><span class="chip ${phone ? 'on' : ''}" data-act="dealMode" data-v="phone">📱 Phone to phone</span></div>
+    <div class="who">${v.players.map((p, k) => `<div class="whop ${p.id === d.to ? 'on' : ''} ${d.need[k] <= 0 ? 'full' : ''}" ${d.need[k] > 0 ? `data-act="dealTo" data-id="${esc(p.id)}"` : ''}>
+      ${avHTML(p.id, p.emoji)}<div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="nd">${hs - d.need[k]}/${hs}</div></div>`).join('')}</div>
+    <div class="bigwrap"><div id="bigdeck" class="bigdeck">${d.left > 0 ? cardHTML(null, 'big top') : ''}</div></div>
+    <div class="dealto">${d.to === App.me ? 'Flick ↑ to deal <b>yourself</b>' : phone ? `📱 Phone head to head with <b>${nm}</b>, then flick ↑` : `Flick ↑ (or tap) to deal to <b>${nm}</b>`}</div>
+    <div class="actions">${!phone ? (d.auto ? '<button class="btn sm" data-act="autoOff">⏸ Stop</button>' : '<button class="btn sm blue" data-act="autoOn">▶ Auto deal</button>')
+      + `<div class="chips">${[[700, 'Slow'], [420, 'Normal'], [220, 'Fast']].map(([sp, l]) => `<span class="chip ${d.speed === sp ? 'on' : ''}" data-act="speed" data-v="${sp}">${l}</span>`).join('')}</div>` : ''}
+      <button class="btn sm ghost" data-act="dealAll">⏩ Skip: deal everyone now</button></div>
+  </div>`;
+}
+
 function rTable(v) {
   const host = App.mode === 'host';
   const dealing = v.phase === 'dealing';
+  if (dealing && host && v.dealing) return rDealScreen(v);
   const canDeal = dealing && host;
   const canDraw = v.phase === 'play' && v.turn === App.me && !v.pending;
   const bump = dealing && !host && v.dealing && v.dealing.mode === 'phone' && v.dealing.to === App.me;
@@ -921,8 +1009,8 @@ function rTable(v) {
       ${seatsHTML(v)}
       <div class="center">
         <div id="deck" class="deck ${canDeal || canDraw ? 'can' : ''}" ${canDraw ? 'data-act="draw"' : ''}>
-          ${v.deckCount > 2 ? cardHTML(null) : ''}${v.deckCount > 1 ? cardHTML(null) : ''}${v.deckCount > 0 ? cardHTML(null, 'top') : '<div class="card top" style="opacity:.1"></div>'}
-          <span class="cnt">${v.deckCount}</span>${canDeal ? '<div class="dealhint">FLICK ↑ OR TAP</div>' : ''}
+          ${v.deckCount > 0 ? cardHTML(null, 'top') : '<div class="card top" style="opacity:.1"></div>'}
+          <span class="cnt">${v.deckCount}</span>
         </div>
         ${dealing ? '' : `<div id="pile" class="pile">${pileHTML(v)}</div>`}
       </div>
@@ -1029,10 +1117,35 @@ function paintHand() {
   const myTurn = v.phase === 'play' && v.turn === App.me && (!v.pending || (v.pending.type === 'drawn' && v.pending.pid === App.me));
   h.classList.toggle('myturn', !!myTurn);
   h.classList.toggle('many', v.me.hand.length > 12);
+  fitHand();
   h.scrollLeft = sc;
   const hint = $('.hint');
   if (hint) hint.textContent = hintText(v);
 }
+// every card fully visible, never on top of another: one row, or two/three rows when the hand is big
+function fitHand() {
+  const h = $('#hand');
+  if (!h) return;
+  const n = h.querySelectorAll('.card').length;
+  const base = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--cw')) || 74;
+  const W = (h.parentElement ? h.parentElement.clientWidth : innerWidth) - 16;
+  const gap = 5;
+  const maxH = Math.max(150, innerHeight * 0.27);
+  let best = 36, rows = 1;
+  for (let r = 1; r <= 3; r++) {
+    const per = Math.ceil(n / r) || 1;
+    const byW = (W - (per - 1) * gap) / per;
+    const byH = (maxH - (r - 1) * 14) / r / 1.5;
+    const cw = Math.min(base, byW, byH);
+    if (cw > best + 0.5) { best = cw; rows = r; }
+  }
+  h.style.setProperty('--cw', Math.max(36, best).toFixed(1) + 'px');
+  h.dataset.rows = rows;
+  // keep cards in sorted order, row by row
+  h.style.setProperty('--per', Math.ceil(n / rows));
+}
+addEventListener('resize', fitHand);
+
 function paintPile() {
   const p = $('#pile');
   if (p && App.view) p.innerHTML = pileHTML(App.view);
@@ -1160,12 +1273,16 @@ document.addEventListener('click', async (e) => {
     case 'hostInstead': readProfile(); setScreen('home', {}); break;
     case 'doCreate':
     case 'doJoin': {
-      sfx.unlock(); keepAwake(); micWarmup();
+      sfx.unlock(); keepAwake();
       const name = readProfile();
       if (!name) { toast('Enter your name first.'); $('#nameIn')?.focus(); return; }
       if (a === 'doJoin') {
         const code = ($('#codeIn')?.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (code.length !== 5) { toast('Table codes have 5 characters.'); $('#codeIn')?.focus(); return; }
+      }
+      if (!store.get('mic')) { App.afterMic = a; micSheet(); return; } // first time: set up the microphone
+      if (a === 'doJoin') {
+        const code = ($('#codeIn')?.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
         try { await clientJoin(code, params.get('b') != null && params.get('join') === code ? Number(params.get('b')) : null); }
         catch (err) { console.error(err); toast('Could not connect. Check your internet and try again.'); teardown(); }
       } else {
@@ -1193,6 +1310,17 @@ document.addEventListener('click', async (e) => {
     case 'closeModal': closeModal(); returnFlung(); if (v) render(); break;
     case 'mute': sfx.setMuted(!sfx.muted); render(); break;
     case 'testSound': testSound(); break;
+    case 'micSetup': App.afterMic = null; micSheet(); break;
+    case 'micAllow': micAllow(); break;
+    case 'micContinue': case 'micSkip': {
+      if (a === 'micSkip') { store.set('mic', 'button'); Mic.denied = true; }
+      else if (!store.get('mic')) store.set('mic', 'ok');
+      micTestStop();
+      closeModal();
+      const next = App.afterMic; App.afterMic = null;
+      if (next) $(`[data-act="${next}"]`)?.click();
+      break;
+    }
     case 'menu': menuSheet(); break;
     case 'share': {
       const link = inviteLink();
@@ -1291,9 +1419,9 @@ function moveGhost(el, x, y, w, scale, rot) {
 document.addEventListener('pointerdown', (e) => {
   if (e.button > 0 || $('#modal.on')) return;
   const v = App.view;
-  const deck = e.target.closest('#deck.can');
-  if (deck && v && v.phase === 'dealing' && App.mode === 'host') {
-    const c = centerOf(deck.querySelector('.card.top') || deck);
+  const deck = e.target.closest('#bigdeck');
+  if (deck && v && v.phase === 'dealing' && App.mode === 'host' && deck.querySelector('.card')) {
+    const c = centerOf(deck.querySelector('.card') || deck);
     gest = { kind: 'deck', x0: e.clientX, y0: e.clientY, t0: performance.now(), w: c.w, el: null, last: [] };
     e.preventDefault();
     return;
@@ -1389,7 +1517,7 @@ function returnFlung() {
 // ======================================================================
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const Mic = { rec: null, on: false, want: false, denied: false, heard: '', lastStart: 0, fails: 0 };
+const Mic = { rec: null, on: false, want: false, denied: store.get('mic') === 'button' || params.has('auto'), heard: '', lastStart: 0, fails: 0 };
 const SATU_RE = /(^|[^a-z0-9])(s[ae]+\s*-?\s*t+\s*[uoe]+[uow]*|setu|satoo|1|one|sa2)([^a-z0-9]|$)/i;
 const micUsable = () => !!SR && !Mic.denied;
 function micWanted(v) {
@@ -1397,12 +1525,64 @@ function micWanted(v) {
   const meP = P(App.me);
   if (!meP || meP.called) return false;
   const n = v.me.hand.length;
-  return n === 1 || (n === 2 && v.turn === App.me);
+  return n === 1;
 }
-function micWarmup() {
-  // ask for the microphone once, while the player is tapping Join/Host, not in the middle of a hand
-  if (!SR || IS_IOS || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-  navigator.mediaDevices.getUserMedia({ audio: true }).then((st) => st.getTracks().forEach((t) => t.stop())).catch(() => { Mic.denied = true; });
+// First time someone hosts or joins: explain the mic, ask for it, and let them test saying "satu".
+function micSheet() {
+  openModal(`<div class="title">🎙 Turn on your microphone</div>
+    <div class="sub">In SATU! you must <b>say "SATU!" out loud</b> when you're down to your <b>last card</b>. The mic only switches on at that moment, to hear you say it.</div>
+    <button class="btn primary block big" data-act="micAllow">🎙 Allow microphone</button>
+    <div id="micStatus" class="micstatus"></div>
+    <div id="micNext"></div>
+    <button class="btn ghost block" data-act="micSkip">Skip: use a SATU! button instead</button>`, 'mic');
+}
+function micGuide(kind) {
+  const ios = IS_IOS;
+  const steps = kind === 'speech'
+    ? (ios ? '<li>Open <b>Settings → General → Keyboard</b> and turn on <b>Enable Dictation</b>.</li><li>Open <b>Settings → Siri</b> and make sure Siri / dictation is allowed.</li><li>Come back here and tap <b>Try again</b>.</li>'
+      : '<li>Use <b>Chrome</b> (it has speech recognition built in).</li><li>Make sure Google / the Google app is allowed to use the microphone.</li><li>Tap <b>Try again</b>.</li>')
+    : (ios ? '<li>Tap <b>aA</b> on the left of the address bar.</li><li>Tap <b>Website Settings → Microphone → Allow</b>.</li><li>Also check <b>Settings → Safari → Microphone → Allow</b>.</li><li>Tap <b>Try again</b>.</li>'
+      : '<li>Tap the <b>🔒</b> (or <b>ⓘ</b>) on the left of the address bar.</li><li>Tap <b>Permissions → Microphone → Allow</b>.</li><li>If Chrome itself has no mic access: <b>Phone Settings → Apps → Chrome → Permissions → Microphone → Allow</b>.</li><li>Tap <b>Try again</b>.</li>');
+  $('#micStatus').innerHTML = `<div class="bad">❌ ${kind === 'speech' ? 'The microphone works, but this phone can\'t recognise speech yet.' : 'The microphone is blocked.'}</div><ol class="guide">${steps}</ol>`;
+  $('#micNext').innerHTML = '<button class="btn blue block" data-act="micAllow">🔁 Try again</button>';
+}
+let micTest = null;
+function micTestStop() { try { micTest && micTest.abort(); } catch (_) {} micTest = null; }
+async function micAllow() {
+  const st = $('#micStatus');
+  if (!st) return;
+  micTestStop();
+  st.innerHTML = 'Asking for the microphone… tap <b>Allow</b> when your phone asks.';
+  $('#micNext').innerHTML = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { micGuide('blocked'); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((t) => t.stop());
+  } catch (_) { micGuide('blocked'); return; }
+  Mic.denied = false;
+  store.set('mic', 'ok');
+  if (!SR) {
+    st.innerHTML = '✅ Microphone allowed, but this browser can\'t recognise speech. You\'ll get a <b>SATU!</b> button instead.';
+    Mic.denied = true; store.set('mic', 'button');
+    $('#micNext').innerHTML = '<button class="btn primary block" data-act="micContinue">Continue</button>';
+    return;
+  }
+  st.innerHTML = '✅ Microphone on! Now say <b>"SATU!"</b> to test it… <div class="heardtest"></div>';
+  $('#micNext').innerHTML = '<button class="btn primary block" data-act="micContinue">Continue</button>';
+  try {
+    const r = new SR();
+    r.lang = 'ms-MY'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 4;
+    r.onresult = (ev) => {
+      for (let i = ev.resultIndex; i < ev.results.length; i++) for (let k = 0; k < ev.results[i].length; k++) {
+        const t = ev.results[i][k].transcript || '';
+        const h = $('.heardtest'); if (h && k === 0) h.textContent = '“' + t.slice(-30) + '”';
+        if (SATU_RE.test(t)) { st.innerHTML = '🎉 Heard you say <b>SATU!</b> Your mic is ready.'; sfx.play('satu'); micTestStop(); return; }
+      }
+    };
+    r.onerror = (ev) => { if (['not-allowed', 'service-not-allowed'].includes(ev.error)) { micGuide('speech'); store.del('mic'); } };
+    r.start();
+    micTest = r;
+  } catch (_) { micGuide('speech'); }
 }
 function micSync() {
   const want = micUsable() && micWanted(App.view);
@@ -1449,6 +1629,11 @@ function heardSatu() {
 // ======================================================================
 function route() {
   const join = (params.get('join') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (join.length === 5 && params.has('auto') && params.get('name')) { // test bench players join by themselves
+    App.profile = { name: params.get('name').slice(0, 16), emoji: params.get('emoji') || EMOJIS[Math.floor(Math.random() * EMOJIS.length)] };
+    clientJoin(join).catch(() => teardown());
+    return;
+  }
   if (join.length === 5) {
     const last = store.get('last');
     if (last && last.code === join && !last.host && store.get('id_' + join) && App.profile.name) {

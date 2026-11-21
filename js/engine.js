@@ -9,7 +9,7 @@ export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 export const TARGETS = [0, 200, 500];
 export const HAND_SIZES = [5, 7, 10];
-export const CATCH_GRACE = 2500; // ms a player gets to say SATU! before they can be caught
+export const CATCH_GRACE = 4000; // ms a player gets to say SATU! before they can be caught
 
 export function buildDeck() {
   const d = [];

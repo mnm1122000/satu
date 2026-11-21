@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SATU! test bench</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0820; color: #fff; font: 14px/1.4 Inter, system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 10px 14px; background: #1a1240; border-bottom: 1px solid #ffffff22; position: sticky; top: 0; z-index: 5; }
+  header b { font-size: 18px; color: #ffd84d; margin-right: 6px; }
+  header label { display: flex; gap: 6px; align-items: center; }
+  select, button { font: inherit; color: #fff; background: #ffffff18; border: 1px solid #ffffff33; border-radius: 10px; padding: 6px 10px; }
+  button.go { background: linear-gradient(#ffd84d, #ff9f1a); color: #3a1d00; font-weight: 800; border: 0; }
+  #status { color: #b9b0e0; }
+  main { display: flex; gap: 18px; padding: 14px; align-items: flex-start; flex-wrap: wrap; }
+  .slot { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .slot .tag { font-weight: 800; font-size: 13px; }
+  .slot .tag.host { color: #ffd84d; font-size: 15px; }
+  .phone { width: 375px; height: 780px; border: 10px solid #222; border-radius: 34px; overflow: hidden; background: #000; box-shadow: 0 20px 50px #0008; }
+  .phone iframe { width: 375px; height: 780px; border: 0; display: block; }
+  .mini { width: calc(375px * var(--s)); height: calc(780px * var(--s)); border-width: 6px; border-radius: 22px; }
+  .mini iframe { transform: scale(var(--s)); transform-origin: 0 0; }
+  #players { display: flex; flex-wrap: wrap; gap: 14px; --s: .62; }
+  .hint { max-width: 380px; color: #b9b0e0; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <b>SATU! test bench</b>
+  <label>Players <select id="n"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label>
+  <label><input type="checkbox" id="autoplay" checked> Players play their own turns</label>
+  <label><input type="checkbox" id="autoflip" checked> Players flip received cards</label>
+  <label>Size <select id="size"><option value=".5">Small</option><option value=".62" selected>Medium</option><option value=".8">Large</option></select></label>
+  <button id="reset">↺ Reset</button>
+  <span id="status">You are the host (big phone). Tap <b>Host a table</b>, the players join by themselves.</span>
+</header>
+<main>
+  <div class="slot">
+    <div class="tag host">👑 YOU (host)</div>
+    <div class="phone"><iframe id="host" src="../index.html?slot=bench_host" allow="microphone; autoplay"></iframe></div>
+  </div>
+  <div id="players"></div>
+</main>
+<script>
+if (location.protocol === 'file:') {
+  document.body.innerHTML = '<div style="padding:30px;font:16px/1.6 sans-serif;color:#fff;max-width:640px">'
+    + '<h2 style="color:#ffd84d">Open the bench through a web address</h2>'
+    + '<p>Browsers block this page when it is opened as a file. Use one of these:</p>'
+    + '<p>🌐 Online: <a style="color:#6fd3ff" href="https://mnm1122000.github.io/satu/tools/bench.html">https://mnm1122000.github.io/satu/tools/bench.html</a></p>'
+    + '<p>💻 Local: run <code>node tools/serve.cjs 5191</code> then open <a style="color:#6fd3ff" href="http://localhost:5191/tools/bench.html">http://localhost:5191/tools/bench.html</a></p></div>';
+  throw new Error('bench needs http(s)');
+}
+// The bench opens the real game in phone-sized frames. You drive the host phone.
+// When your table code appears, the player phones join on their own (?auto=1).
+const NAMES = ['Aina', 'Bob', 'Chloe', 'Dina', 'Eiman', 'Farah'];
+const EMO = ['🦊', '🐼', '🐯', '🐸', '🦄', '🐙'];
+const $ = (s) => document.querySelector(s);
+const hostDoc = () => $('#host').contentDocument;
+let joinedCode = null;
+
+function makePlayers(code) {
+  const box = $('#players');
+  box.innerHTML = '';
+  const n = Number($('#n').value);
+  for (let i = 0; i < n; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'slot';
+    slot.innerHTML = `<div class="tag">${EMO[i]} ${NAMES[i]}</div><div class="phone mini"><iframe allow="microphone; autoplay" src="../index.html?join=${code}&slot=bench_p${i}&auto=1&name=${NAMES[i]}&emoji=${encodeURIComponent(EMO[i])}"></iframe></div>`;
+    box.appendChild(slot);
+  }
+  $('#status').textContent = `Table ${code}: ${n} players joining… then tap “Shuffle & deal” on your phone.`;
+}
+
+// watch the host phone for a table code
+setInterval(() => {
+  let code = null;
+  try { code = hostDoc().querySelector('.codebox .code')?.textContent?.trim(); } catch (_) {}
+  if (code && code !== joinedCode) { joinedCode = code; makePlayers(code); }
+}, 700);
+
+$('#reset').onclick = () => { joinedCode = null; $('#players').innerHTML = ''; $('#host').src = $('#host').src; $('#status').textContent = 'Tap Host a table on the big phone.'; };
+$('#size').onchange = () => { $('#players').style.setProperty('--s', $('#size').value); };
+$('#n').onchange = () => { if (joinedCode) $('#status').textContent = 'Player count changes on the next Reset.'; };
+
+// simple player brains: flip dealt cards, play a matching card, otherwise draw
+const recvSeen = new WeakMap();
+setInterval(() => {
+  const frames = [...document.querySelectorAll('#players iframe')];
+  for (const f of frames) {
+    let d; try { d = f.contentDocument; } catch (_) { continue; }
+    if (!d || !d.body) continue;
+    const recv = d.querySelector('#recv');
+    if (recv) {
+      if (!$('#autoflip').checked) continue;
+      const first = recvSeen.get(recv) || Date.now();
+      recvSeen.set(recv, first);
+      if (Date.now() - first > 1200) recv.querySelector('.rcard')?.click();
+      continue;
+    }
+    if (!$('#autoplay').checked) continue;
+    const m = d.querySelector('#modal.on');
+    if (m) {
+      const opts = m.querySelectorAll('[data-act=firstColor],[data-act=accept4],[data-act=challenge4],[data-act=micSkip]');
+      if (opts.length) { opts[Math.floor(Math.random() * opts.length)].click(); continue; }
+    }
+    const shout = d.querySelector('[data-act=shout]');
+    if (shout && Math.random() < 0.6) { shout.click(); continue; }
+    const c = d.querySelector('[data-act=catch]');
+    if (c && Math.random() < 0.25) { c.click(); continue; }
+    if (!d.querySelector('.status .main.me')) continue;
+    const ok = d.querySelector('#hand .card.ok:not(.hid)');
+    if (ok) {
+      ok.click();
+      setTimeout(() => {
+        d.querySelector('#hand .card.sel')?.click();
+        setTimeout(() => { const w = d.querySelectorAll('#modal.on [data-act=playWild]'); if (w.length) w[Math.floor(Math.random() * 4)].click(); }, 150);
+      }, 250);
+      continue;
+    }
+    (d.querySelector('[data-act=pass]') || d.querySelector('.actions [data-act=draw]'))?.click();
+  }
+}, 1500);
+</script>
+</body>
+</html>
