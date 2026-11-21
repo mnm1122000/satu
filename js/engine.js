@@ -9,6 +9,7 @@ export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 export const TARGETS = [0, 200, 500];
 export const HAND_SIZES = [5, 7, 10];
+export const CATCH_GRACE = 2500; // ms a player gets to say SATU! before they can be caught
 
 export function buildDeck() {
   const d = [];
@@ -146,23 +147,50 @@ export class Game {
     s.pending = null; s.vulnerable = null; s.winner = null; s.lastRound = null;
     for (const p of s.players) { p.hand = []; p.called = false; }
     s.phase = 'dealing';
-    s.deal = { left: s.settings.handSize * n, total: s.settings.handSize * n, pos: (s.dealer + 1) % n, at: 0, auto: false, speed: 420 };
+    s.deal = { left: s.settings.handSize * n, total: s.settings.handSize * n, pos: (s.dealer + 1) % n, at: 0, auto: false, speed: 420, mode: s.dealMode || 'round' };
     this.emit({ type: 'shuffle' });
     this.log(`Round ${s.round}: ${s.players[s.dealer].name} shuffles the deck`);
   }
 
+  // next player (from index i, inclusive) who still needs cards
+  needy(i) {
+    const s = this.s, n = s.players.length;
+    for (let k = 0; k < n; k++) {
+      const j = (i + k) % n;
+      if (s.players[j].hand.length < s.settings.handSize) return j;
+    }
+    return -1;
+  }
+
+  // mode 'round': one card each, round the table. mode 'phone': keep dealing to the chosen
+  // player (phones head to head) until their hand is full, then move to the next one.
   dealOne(now) {
     const s = this.s;
     if (s.phase !== 'dealing' || !s.deal) return false;
-    if (now - s.deal.at < 140) return false;
-    const p = s.players[s.deal.pos];
+    if (now - s.deal.at < 120) return false;
+    const pi = this.needy(s.deal.pos);
+    if (pi < 0) { this.flipStart(); return true; }
+    const p = s.players[pi];
     const card = s.deck.pop();
     p.hand.push(card);
     s.deal.left--;
     s.deal.at = now;
     this.emit({ type: 'deal', to: p.id, card, left: s.deal.left, n: p.hand.length, deck: s.deck.length });
-    s.deal.pos = (s.deal.pos + 1) % s.players.length;
-    if (s.deal.left <= 0) this.flipStart();
+    if (s.deal.left <= 0) { this.flipStart(); return true; }
+    s.deal.pos = this.needy(s.deal.mode === 'phone' ? pi : (pi + 1) % s.players.length);
+    return true;
+  }
+
+  // skip the animation: everyone gets the rest of their cards at once
+  dealAll() {
+    const s = this.s;
+    if (s.phase !== 'dealing' || !s.deal) return false;
+    for (const p of s.players) {
+      while (p.hand.length < s.settings.handSize && s.deck.length) { p.hand.push(s.deck.pop()); s.deal.left--; }
+    }
+    this.emit({ type: 'dealAll', counts: s.players.map((p) => p.hand.length), deck: s.deck.length });
+    this.log('The host dealt everyone in one go');
+    this.flipStart();
     return true;
   }
 
@@ -283,9 +311,26 @@ export class Game {
       case 'deal':
         if (!host) return err('Only the host deals.');
         return { ok: this.dealOne(now) };
+      case 'dealAll':
+        if (!host) return err('Only the host deals.');
+        return { ok: this.dealAll() };
+      case 'dealTo': { // host picks who gets the next cards
+        if (!host || s.phase !== 'dealing') return err('Not dealing.');
+        const i = this.idx(a.target);
+        if (i < 0) return err('Unknown player.');
+        if (s.players[i].hand.length >= s.settings.handSize) return err(`${s.players[i].name} already has ${s.settings.handSize} cards.`);
+        s.deal.pos = i;
+        return { ok: true };
+      }
+      case 'dealMode':
+        if (!host || s.phase !== 'dealing' || !['round', 'phone'].includes(a.mode)) return err('Not dealing.');
+        s.deal.mode = s.dealMode = a.mode;
+        if (a.mode === 'phone') s.deal.auto = false;
+        return { ok: true };
       case 'auto':
         if (!host || s.phase !== 'dealing') return err('Not dealing.');
         s.deal.auto = !!a.on;
+        if (a.on) s.deal.mode = s.dealMode = 'round';
         if ([220, 420, 700].includes(a.speed)) s.deal.speed = a.speed;
         return { ok: true };
 
@@ -318,7 +363,7 @@ export class Game {
         s.color = card.c === 'w' ? a.color : card.c;
         this.emit({ type: 'play', by: pid, card, color: s.color, left: p.hand.length });
         this.log(`${p.name} played ${cardName(card)}${card.c === 'w' ? ` → ${COLOR_NAME[s.color]}` : ''}`);
-        if (p.hand.length === 1 && !p.called) s.vulnerable = pid;
+        if (p.hand.length === 1 && !p.called) { s.vulnerable = pid; s.vulnAt = now; }
 
         const n = s.players.length;
         if (p.hand.length === 0) {
@@ -434,6 +479,7 @@ export class Game {
       case 'catch': {
         const t = s.vulnerable && this.p(s.vulnerable);
         if (s.phase !== 'play' || !t || t.id === pid) return err('Too late!');
+        if (now - (s.vulnAt || 0) < CATCH_GRACE) return err(`Give ${t.name} a second to say SATU!`);
         s.vulnerable = null;
         const got = this.drawCards(t, 2);
         this.emit({ type: 'catch', by: pid, target: t.id });
@@ -489,7 +535,8 @@ export class Game {
       turn: s.phase === 'play' && s.players[s.turn] ? s.players[s.turn].id : null,
       dealer: s.players[s.dealer] ? s.players[s.dealer].id : null,
       dir: s.dir, color: s.color, top: this.top, deckCount: s.deck.length, discardCount: s.discard.length,
-      dealing: s.deal ? { to: s.players[s.deal.pos].id, left: s.deal.left, total: s.deal.total, auto: s.deal.auto, speed: s.deal.speed } : null,
+      dealing: s.deal ? { to: s.players[s.deal.pos] ? s.players[s.deal.pos].id : null, left: s.deal.left, total: s.deal.total, auto: s.deal.auto, speed: s.deal.speed, mode: s.deal.mode, need: s.players.map((p) => s.settings.handSize - p.hand.length) } : null,
+      vulnAt: s.vulnAt || 0,
       pending: pd ? { type: pd.type, pid: pd.pid, by: pd.by, card: pd.pid === pid ? pd.card : undefined } : null,
       vulnerable: s.vulnerable,
       log: s.log.slice(-8),

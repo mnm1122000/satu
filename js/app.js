@@ -1,7 +1,7 @@
 // SATU! — app: screens, host loop, client flow, dealing & card animations.
-import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, canPlay, cardName } from './engine.js?v=1';
-import * as net from './net.js?v=1';
-import { sfx, vibrate } from './sfx.js?v=1';
+import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, CATCH_GRACE, canPlay, cardName } from './engine.js?v=2';
+import * as net from './net.js?v=2';
+import { sfx, vibrate } from './sfx.js?v=2';
 
 // ======================================================================
 // utils
@@ -49,9 +49,57 @@ const App = {
   ui: { sel: null },
   hidden: new Set(), pileHide: null,
   modalKind: null,
+  vulnSeen: {}, flung: null, flickFrom: null,
 };
 const P = (id) => App.view && App.view.players.find((p) => p.id === id);
 const nameOf = (id) => (id === App.me ? 'You' : P(id)?.name || '?');
+
+// ======================================================================
+// profile photos (selfie / gallery) — shared on a retained relay topic per player
+// ======================================================================
+App.avatars = {};
+function avHTML(id, emoji, cls = 'av') {
+  const img = id === App.me ? App.profile.photo || App.avatars[id] : App.avatars[id];
+  return img ? `<div class="${cls} photo" data-av="${esc(id)}" style="background-image:url('${img}')"></div>`
+    : `<div class="${cls}" data-av="${esc(id)}">${esc(emoji || '🙂')}</div>`;
+}
+function fileToPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(img.width, img.height);
+      const c = document.createElement('canvas');
+      c.width = c.height = 160;
+      c.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 160, 160);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.72));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that picture.')); };
+    img.src = url;
+  });
+}
+function publishPhoto() {
+  if (!App.bus || !App.me) return;
+  App.bus.publish('av/' + App.me, App.profile.photo ? { img: App.profile.photo } : null, { retain: true });
+}
+function onAvatar(data, id) {
+  if (data && typeof data.img === 'string' && data.img.startsWith('data:image/') && data.img.length < 60000) App.avatars[id] = data.img;
+  else if (!data) delete App.avatars[id];
+  else return;
+  if (App.screen === 'game') render();
+}
+async function onPicked(file) {
+  if (!file) return;
+  try {
+    App.profile.photo = await fileToPhoto(file);
+    store.set('profile', App.profile);
+    publishPhoto();
+    render();
+  } catch (e) { toast(e.message); }
+}
+$('#filePick').addEventListener('change', (e) => { onPicked(e.target.files[0]); e.target.value = ''; });
+$('#camPick').addEventListener('change', (e) => { onPicked(e.target.files[0]); e.target.value = ''; });
 
 // ======================================================================
 // wake lock + audio unlock
@@ -102,7 +150,9 @@ async function hostWire() {
   const bus = App.bus;
   bus.onStatus = (s) => netBanner(s === 'online' ? null : 'Connection lost. Reconnecting…');
   await bus.subscribe('up', onHostUp);
+  await bus.subscribe('av/+', onAvatar);
   publishMeta(true);
+  publishPhoto();
   App.screen = 'game';
   store.set('last', { code: App.code, host: true, at: Date.now() });
   clearInterval(App.loop); clearInterval(App.beat);
@@ -283,6 +333,7 @@ async function closeTable() {
   if (App.mode !== 'host') return;
   for (const p of App.game.s.players) if (!p.bot && p.id !== App.me) sendTo(p.id, { type: 'error', error: 'The host closed the table.', fatal: true });
   App.bus.publish('meta', null, { retain: true });
+  for (const p of App.game.s.players) App.bus.publish('av/' + p.id, null, { retain: true });
   store.del('host'); store.del('last');
   await sleep(900);
   teardown();
@@ -306,6 +357,8 @@ async function clientJoin(code, preferredBroker = null) {
   const bus = App.bus;
   bus.onStatus = (s) => { if (s === 'online') { netBanner(null); clientHello(); } else netBanner('Connection lost. Reconnecting…'); };
   await bus.subscribe('dn/' + App.me, onClientDn);
+  await bus.subscribe('av/+', onAvatar);
+  publishPhoto();
   await bus.subscribe('fx', (e) => {
     if (!e || typeof e.type !== 'string' || !App.view) return;
     if ((e.type === 'deal' && e.to === App.me) || (e.type === 'draw' && e.by === App.me)) return; // my private copy brings the card
@@ -353,6 +406,7 @@ async function handleDn(data) {
   else if (msg.type === 'error') {
     toast(msg.error, 3500);
     sfx.play('error');
+    returnFlung();
     if (msg.fatal) { store.del('last'); teardown(); }
   }
 }
@@ -370,7 +424,7 @@ function teardown() {
 function act(a) {
   if (App.mode === 'host') {
     const res = App.game.handle(App.me, a, Date.now());
-    if (!res.ok && res.error) { toast(res.error); sfx.play('error'); }
+    if (!res.ok && res.error) { toast(res.error); sfx.play('error'); returnFlung(); }
     afterChange();
   } else if (App.mode === 'client') sendHost({ type: 'act', a });
 }
@@ -392,6 +446,7 @@ function applyView(v) {
   for (const id of App.hidden) if (!ids.has(id)) App.hidden.delete(id);
   render();
   syncModal(v);
+  micSync();
 }
 
 // decisions that need a sheet: first colour, +4 challenge
@@ -410,7 +465,7 @@ function seatPt(pid) {
   const el = document.querySelector(`[data-seat="${CSS.escape(pid)}"] .av`);
   return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.2, w: 40 };
 }
-const deckPt = () => { const el = $('#deck .card:last-of-type'); return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.3, w: 64 }; };
+const deckPt = () => { const el = $('#deck .card.top'); return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.3, w: 64 }; };
 const pilePt = () => { const el = $('#pile'); return el ? centerOf(el) : { x: innerWidth / 2, y: innerHeight * 0.3, w: 64 }; };
 function handEndPt() {
   const hand = $('#hand');
@@ -528,10 +583,30 @@ function onFx(e) {
       const p = P(e.to);
       if (p && e.n != null) p.count = e.n;
       if (e.deck != null) v.deckCount = e.deck;
-      if (v.dealing) { v.dealing.left = e.left; const i = v.players.findIndex((x) => x.id === e.to); v.dealing.to = v.players[(i + 1) % v.players.length].id; }
+      if (v.dealing) {
+        v.dealing.left = e.left;
+        const i = v.players.findIndex((x) => x.id === e.to);
+        if (i >= 0) v.dealing.need[i] = v.settings.handSize - e.n;
+        if (v.dealing.mode !== 'phone' || v.dealing.need[i] <= 0) {
+          for (let k = 1; k <= v.players.length; k++) { const j = (i + k) % v.players.length; if (v.dealing.need[j] > 0) { v.dealing.to = v.players[j].id; break; } }
+        }
+      }
       if (e.to === me && e.card && !v.me.hand.some((c) => c.id === e.card.id)) { v.me.hand.push(e.card); App.hidden.add(e.card.id); }
       render();
       animDeal(e, isDealer);
+      break;
+    }
+    case 'dealAll': {
+      e.counts.forEach((c, i) => { if (v.players[i]) v.players[i].count = c; });
+      v.deckCount = e.deck;
+      sfx.play('shuffle', { small: true });
+      for (let i = 0; i < 5; i++) sfx.play('trrr', { delay: 0.1 + i * 0.12 });
+      const d = deckPt(), end = handEndPt();
+      for (let i = 0; i < 6; i++) {
+        const from = App.mode === 'host' ? d : { x: innerWidth / 2, y: -80 };
+        fly({ pts: [{ x: from.x, y: from.y, r: -20 }, { x: end.x - 120 + i * 40, y: end.y, r: (i - 3) * 6 }], w: end.w, dur: 520, delay: i * 90 });
+      }
+      vibrate([30, 40, 30, 40, 30]);
       break;
     }
     case 'flip': {
@@ -570,7 +645,6 @@ function onFx(e) {
       sfx.play('satu');
       burst(seatPt(e.by), 'SATU!', 'satu', 1500);
       vibrate(80);
-      if (e.by === me) speak('Satu!');
       break;
     case 'catch':
       sfx.play('catch');
@@ -611,9 +685,13 @@ function animDeal(e, isDealer) {
     sfx.play('trrr');
     vibrate(12);
     const s = seatPt(e.to);
-    const lean = (s.x - d.x) / innerWidth;
-    fly({ pts: [{ x: d.x, y: d.y, r: 0 }, { x: d.x + lean * 60, y: d.y - 70, r: lean * 30, s: 1.25 }, { x: d.x + lean * 260, y: -140, r: lean * 60 + (Math.random() - 0.5) * 20, s: 1.35, o: 0.9 }],
-      w: d.w, dur: 430, label: '→ ' + nameOf(e.to), ease: 'cubic-bezier(.4,.1,.6,1)' });
+    const phone = App.view.dealing && App.view.dealing.mode === 'phone';
+    const lean = phone ? 0 : (s.x - d.x) / innerWidth;
+    const f = App.flickFrom && Date.now() - App.flickFrom.at < 600 ? App.flickFrom : null;
+    App.flickFrom = null;
+    const st = f ? { x: f.x, y: f.y, r: 0, s: 1.3 } : { x: d.x, y: d.y, r: 0 };
+    fly({ pts: [st, { x: st.x + lean * 60, y: st.y - 70, r: lean * 30, s: 1.3 }, { x: st.x + lean * 260, y: -160, r: lean * 60 + (Math.random() - 0.5) * 16, s: 1.4, o: 0.9 }],
+      w: d.w, dur: f ? 300 : 430, label: '→ ' + nameOf(e.to), ease: 'cubic-bezier(.4,.1,.6,1)' });
     popSeat(e.to);
     return;
   }
@@ -625,7 +703,7 @@ function animDeal(e, isDealer) {
 function animPlay(e) {
   const me = App.me;
   const pl = pilePt();
-  const rot = ((e.card.id * 37) % 24) - 12;
+  const rot = ((e.card.id * 37) % 16) - 8;
   App.pileHide = e.card.id;
   const land = () => {
     App.pileHide = null; paintPile();
@@ -634,6 +712,12 @@ function animPlay(e) {
     else if (e.card.v === 'w') sfx.play('wild', { delay: 0.05 });
     if (e.card.c === 'w') colorFlash(e.color);
   };
+  if (e.by === me && App.flung && App.flung.id === e.card.id) {
+    const g = App.flung; App.flung = null;
+    clearTimeout(g.timer);
+    setTimeout(() => { g.el.remove(); land(); }, Math.max(0, g.landAt - Date.now()));
+    return;
+  }
   if (e.by === me) {
     const src = document.querySelector(`#hand [data-cid="${e.card.id}"]`);
     const from = src ? centerOf(src) : handEndPt();
@@ -724,8 +808,12 @@ function rHome() {
     ${canRejoin && !code ? `<button class="btn blue block" data-act="rejoin">↩ Rejoin table ${esc(last.code)}</button>` : ''}
     <div class="panel">
       <h3>You</h3>
+      <div class="me-row">
+        <div class="me-av ${pr.photo ? 'photo' : ''}" data-act="pickGallery" style="${pr.photo ? `background-image:url('${pr.photo}')` : ''}">${pr.photo ? '' : esc(pr.emoji)}</div>
+        <div class="me-btns"><button class="btn sm" data-act="pickCamera">📸 Take photo</button><button class="btn sm" data-act="pickGallery">🖼️ Gallery</button>${pr.photo ? '<button class="btn sm ghost" data-act="clearPhoto">✕ Use emoji</button>' : ''}</div>
+      </div>
       <input id="nameIn" class="field" maxlength="16" placeholder="Your name" value="${esc(pr.name)}" autocomplete="off">
-      <div class="emojis">${EMOJIS.map((e) => `<button data-act="emoji" data-e="${e}" class="${e === pr.emoji ? 'on' : ''}">${e}</button>`).join('')}</div>
+      <div class="emojis">${EMOJIS.map((e) => `<button data-act="emoji" data-e="${e}" class="${e === pr.emoji && !pr.photo ? 'on' : ''}">${e}</button>`).join('')}</div>
     </div>
     ${code ? `
     <div class="panel">
@@ -774,7 +862,7 @@ function rLobby(v) {
       <div class="row"><button class="btn blue" data-act="share">📤 Share link</button><button class="btn ghost" data-act="copy">📋 Copy</button></div>
     </div>
     <div class="panel"><h3>Players</h3><div class="plist">
-      ${v.players.map((p) => `<div class="prow"><span class="dot ${p.online ? '' : 'off'}"></span><div class="em">${esc(p.emoji)}</div><div class="nm">${esc(p.name)}${p.id === App.me ? ' (you)' : ''}</div>
+      ${v.players.map((p) => `<div class="prow"><span class="dot ${p.online ? '' : 'off'}"></span>${avHTML(p.id, p.emoji, 'em')}<div class="nm">${esc(p.name)}${p.id === App.me ? ' (you)' : ''}</div>
         ${p.id === v.hostId ? '<span class="tag">HOST · DEALER</span>' : ''}${host && p.id !== v.hostId ? `<button class="x" data-act="kick" data-id="${esc(p.id)}">✕</button>` : ''}</div>`).join('')}
     </div>${DEV && host ? '<button class="btn ghost block sm" data-act="addBot">+ Add bot</button>' : ''}</div>
     <div class="panel"><h3>Settings</h3>
@@ -804,34 +892,37 @@ function seatsHTML(v) {
     const ang = Math.PI / 2 + (j * 2 * Math.PI) / n; // me at the bottom, play order runs clockwise
     const x = 50 + 43 * Math.cos(ang), y = 50 + 41 * Math.sin(ang);
     const cls = [p.id === turnId ? 'turn' : '', p.id === dealTo ? 'dealto' : '', p.online === false ? 'off' : '', v.vulnerable === p.id ? 'vuln' : ''].join(' ');
-    return `<div class="seat ${cls}" data-seat="${esc(p.id)}" style="left:${x}%;top:${y}%">
-      <div class="av">${esc(p.emoji)}</div><div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="cc">${p.count}</div>
+    const pick = v.phase === 'dealing' && App.mode === 'host' && v.dealing && v.dealing.need[k] > 0;
+    return `<div class="seat ${cls}" data-seat="${esc(p.id)}" ${pick ? `data-act="dealTo" data-id="${esc(p.id)}"` : ''} style="left:${x}%;top:${y}%">
+      ${avHTML(p.id, p.emoji)}<div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="cc">${p.count}</div>
       ${p.called && p.count <= 2 && p.count > 0 ? '<div class="satu-b">SATU!</div>' : ''}${p.id === v.dealer ? '<div class="dealer">D</div>' : ''}</div>`;
   }).join('');
 }
 
 function pileHTML(v) {
   if (!v.top) return '<div class="card" style="opacity:.15"></div>';
-  const under = v.discardCount > 1 ? '<div class="card back under" style="filter:brightness(.6)"><div class="in"></div></div>' : '';
-  const rot = ((v.top.id * 37) % 24) - 12;
-  const cc = v.color ? COLOR_HEX[v.color] : 'transparent';
-  return `${under}${cardHTML(v.top, App.pileHide === v.top.id ? 'invisible' : '').replace('class="card', `style="--rot:${rot}deg" class="card`)}<div class="colorring" style="--cc:${cc}"></div>`;
+  const rot = ((v.top.id * 37) % 16) - 8;
+  const pill = v.color ? `<div class="cpill" style="background:${COLOR_HEX[v.color]}">${COLOR_NAME[v.color]}</div>` : '';
+  return `${cardHTML(v.top, App.pileHide === v.top.id ? 'invisible' : '').replace('class="card', `style="--rot:${rot}deg" class="card`)}${pill}`;
 }
 
 function rTable(v) {
   const host = App.mode === 'host';
   const dealing = v.phase === 'dealing';
   const canDeal = dealing && host;
+  const canDraw = v.phase === 'play' && v.turn === App.me && !v.pending;
+  const bump = dealing && !host && v.dealing && v.dealing.mode === 'phone' && v.dealing.to === App.me;
   const sub = dealing ? `Round ${v.round} · dealing` : `Round ${v.round} · ${v.settings.target ? 'to ' + v.settings.target : 'single round'}`;
   return `<div class="game">${topbar(v, sub)}
+    ${bump ? '<div class="bump">⬆ Put the top of your phone against the host\'s phone ⬆</div>' : ''}
     <div id="table" class="table">
       <div class="felt"></div>
       <div class="dirring ${v.dir < 0 ? 'ccw' : ''}">${dirSVG()}</div>
       ${seatsHTML(v)}
       <div class="center">
-        <div id="deck" class="deck ${canDeal ? 'can' : ''}" ${canDeal ? 'data-act="deal"' : ''}>
-          ${v.deckCount > 2 ? cardHTML(null) : ''}${v.deckCount > 1 ? cardHTML(null) : ''}${v.deckCount > 0 ? cardHTML(null) : '<div class="card" style="opacity:.1"></div>'}
-          <span class="cnt">${v.deckCount}</span>${canDeal ? '<div class="dealhint">TAP TO DEAL</div>' : ''}
+        <div id="deck" class="deck ${canDeal || canDraw ? 'can' : ''}" ${canDraw ? 'data-act="draw"' : ''}>
+          ${v.deckCount > 2 ? cardHTML(null) : ''}${v.deckCount > 1 ? cardHTML(null) : ''}${v.deckCount > 0 ? cardHTML(null, 'top') : '<div class="card top" style="opacity:.1"></div>'}
+          <span class="cnt">${v.deckCount}</span>${canDeal ? '<div class="dealhint">FLICK ↑ OR TAP</div>' : ''}
         </div>
         ${dealing ? '' : `<div id="pile" class="pile">${pileHTML(v)}</div>`}
       </div>
@@ -849,7 +940,17 @@ function statusHTML(v) {
   let main = '', me = false;
   if (v.phase === 'dealing') {
     const d = v.dealing;
-    main = App.mode === 'host' ? `Deal to <b>${esc(nameOf(d.to))}</b> · ${d.left} left` : `🃏 Dealing… ${d ? d.left : ''} cards left`;
+    const phone = d && d.mode === 'phone';
+    const ti = v.players.findIndex((x) => x.id === d.to);
+    const need = d && ti >= 0 ? d.need[ti] : 0;
+    if (App.mode === 'host') {
+      main = d.to === App.me ? `Deal yourself · ${need} more` : phone
+        ? `📱 Phone head-to-head with <b>${esc(nameOf(d.to))}</b>, flick ↑ · ${need} more`
+        : `Flick or tap the deck → <b>${esc(nameOf(d.to))}</b> · ${d.left} left`;
+    } else {
+      me = phone && d.to === App.me;
+      main = me ? `📱 Touch your phone's top to the host's phone!` : `🃏 Dealing to ${esc(nameOf(d.to))}… ${d.left} left`;
+    }
   } else if (pd && pd.type === 'challenge') {
     me = pd.pid === App.me;
     main = me ? 'Challenge the +4?' : `${esc(nameOf(pd.pid))} is deciding: challenge the +4?`;
@@ -871,8 +972,12 @@ function actionsHTML(v) {
   if (v.phase === 'dealing') {
     if (host) {
       const d = v.dealing;
-      out.push(d.auto ? '<button class="btn" data-act="autoOff">⏸ Stop</button>' : '<button class="btn blue" data-act="autoOn">▶ Auto deal</button>');
-      out.push(`<div class="chips">${[[700, 'Slow'], [420, 'Normal'], [220, 'Fast']].map(([sp, l]) => `<span class="chip ${d.speed === sp ? 'on' : ''}" data-act="speed" data-v="${sp}">${l}</span>`).join('')}</div>`);
+      out.push(`<div class="chips"><span class="chip ${d.mode !== 'phone' ? 'on' : ''}" data-act="dealMode" data-v="round">🔄 Round the table</span><span class="chip ${d.mode === 'phone' ? 'on' : ''}" data-act="dealMode" data-v="phone">📱 Phone to phone</span></div>`);
+      if (d.mode !== 'phone') {
+        out.push(d.auto ? '<button class="btn sm" data-act="autoOff">⏸ Stop</button>' : '<button class="btn sm blue" data-act="autoOn">▶ Auto deal</button>');
+        out.push(`<div class="chips">${[[700, 'Slow'], [420, 'Normal'], [220, 'Fast']].map(([sp, l]) => `<span class="chip ${d.speed === sp ? 'on' : ''}" data-act="speed" data-v="${sp}">${l}</span>`).join('')}</div>`);
+      } else out.push('<div class="small">Tap a player to choose who gets cards next.</div>');
+      out.push('<button class="btn sm ghost" data-act="dealAll">⏩ Skip: deal everyone now</button>');
     }
     return out.join('');
   }
@@ -882,8 +987,15 @@ function actionsHTML(v) {
   const meP = P(App.me);
   if (myTurn && !pd) out.push('<button class="btn blue" data-act="draw">🂠 Draw</button>');
   if (myTurn && pd && pd.type === 'drawn' && pd.pid === App.me) out.push('<button class="btn" data-act="pass">✋ Keep it</button>');
-  if (meP && v.me.hand.length <= 2 && v.me.hand.length > 0 && !meP.called) out.push(`<button class="btn satu ${v.me.hand.length === 2 && myTurn ? 'pulse' : ''}" data-act="shout">SATU!</button>`);
-  if (v.vulnerable && v.vulnerable !== App.me) out.push(`<button class="btn catch pulse" data-act="catch">🚨 Catch ${esc(nameOf(v.vulnerable))}!</button>`);
+  if (meP && v.me.hand.length <= 2 && v.me.hand.length > 0 && !meP.called) {
+    if (micUsable() && micWanted(v)) out.push(`<div class="mic ${Mic.on ? 'on' : ''}"><span class="dotrec"></span>🎙 Say “SATU!” <span class="heard">${esc(Mic.heard)}</span></div>`);
+    else if (!micUsable()) out.push(`<button class="btn satu ${v.me.hand.length === 2 && myTurn ? 'pulse' : ''}" data-act="shout">SATU!</button>`);
+  }
+  if (v.vulnerable && v.vulnerable !== App.me) {
+    if (App.vulnSeen.id !== v.vulnerable) { App.vulnSeen = { id: v.vulnerable, at: Date.now() }; setTimeout(render, CATCH_GRACE + 50); }
+    if (Date.now() - App.vulnSeen.at >= CATCH_GRACE) out.push(`<button class="btn catch pulse" data-act="catch">🚨 Catch ${esc(nameOf(v.vulnerable))}! (no SATU)</button>`);
+    else out.push(`<div class="small">⏳ ${esc(nameOf(v.vulnerable))} has 1 card… did they say SATU?</div>`);
+  }
   if (pd && pd.type === 'challenge' && pd.pid === App.me && App.modalKind !== 'challenge') out.push('<button class="btn primary" data-act="openChallenge">Decide on +4</button>');
   if (pd && pd.type === 'color' && pd.pid === App.me && App.modalKind !== 'color') out.push('<button class="btn primary" data-act="openColor">Pick colour</button>');
   return out.join('');
@@ -891,9 +1003,9 @@ function actionsHTML(v) {
 
 function hintText(v) {
   if (v.phase !== 'play' || v.turn !== App.me || v.pending) return v.phase === 'play' && v.color ? `Colour in play: ${COLOR_NAME[v.color]}` : '';
-  if (App.ui.sel != null) return 'Tap the card again to play it';
+  if (App.ui.sel != null) return 'Flick it up to the pile, or tap it again';
   const any = v.me.hand.some((c) => canPlay(c, v.top, v.color));
-  return any ? `Match ${COLOR_NAME[v.color] || ''} or ${GLYPH[v.top.v] ? cardName(v.top).replace(/^\w+ /, '') : v.top.v} · tap a card` : 'No match. Draw a card';
+  return any ? `Flick a glowing card up onto the pile` : 'No match. Tap the deck to draw';
 }
 
 function handInner(v) {
@@ -904,7 +1016,7 @@ function handInner(v) {
   if (!hand.length) return `<div class="empty">${v.phase === 'dealing' ? 'Your cards will fly in here…' : 'No cards'}</div>`;
   return hand.map((c) => {
     const ok = drawnOnly != null ? c.id === drawnOnly : myTurn && canPlay(c, v.top, v.color);
-    const cls = [ok ? 'ok' : '', App.ui.sel === c.id ? 'sel' : '', App.hidden.has(c.id) ? 'hid' : ''].join(' ');
+    const cls = [ok ? 'ok' : '', App.ui.sel === c.id ? 'sel' : '', App.hidden.has(c.id) || (App.flung && App.flung.id === c.id) ? 'hid' : ''].join(' ');
     return cardHTML(c, cls).replace('class="card', `data-act="card" data-id="${c.id}" class="card`);
   }).join('');
 }
@@ -937,12 +1049,12 @@ function rResults(v) {
   const handOf = (id) => (lr ? lr.hands.find((h) => h.id === id) : null);
   return `<div class="game">${topbar(v, over ? 'Game over' : `Round ${v.round} finished`)}
     <div class="scroll">
-      <div class="winner"><div class="big">${esc(w?.emoji || '🏆')}</div>
+      <div class="winner">${w ? avHTML(w.id, w.emoji, 'big') : '<div class="big">🏆</div>'}
         <h2>${esc(winId === App.me ? 'You win' : (w?.name || '') + ' wins')}${over ? ' the game!' : ' the round!'}</h2>
         <div class="small">${lr && !over ? `+${lr.pts} points from everyone's leftover cards` : over && target ? `First to ${target} points` : lr ? `+${lr.pts} points` : ''}</div></div>
       ${ranked.map((p) => {
         const h = handOf(p.id);
-        return `<div class="res ${p.id === winId ? 'win' : ''}"><div class="em">${esc(p.emoji)}</div><div class="info"><b>${esc(p.id === App.me ? 'You' : p.name)}</b>
+        return `<div class="res ${p.id === winId ? 'win' : ''}">${avHTML(p.id, p.emoji, 'em')}<div class="info"><b>${esc(p.id === App.me ? 'You' : p.name)}</b>
           ${h && h.cards.length ? `<div class="cards">${sortHand(h.cards).map((c) => cardHTML(c, 'tiny')).join('')}</div><div class="small">${h.pts} pts in hand</div>` : h ? '<div class="small">Out of cards 🎉</div>' : ''}
           ${target ? `<div class="bar"><i style="width:${Math.min(100, (p.score / target) * 100)}%"></i></div>` : ''}</div>
           <div class="sc">${p.score}<small>points</small></div></div>`;
@@ -1039,13 +1151,16 @@ document.addEventListener('click', async (e) => {
   if (!t) return;
   const a = t.dataset.act;
   const v = App.view;
-  if (!['card', 'deal', 'closeModal'].includes(a)) sfx.play('click');
+  if (!['card', 'closeModal'].includes(a)) sfx.play('click');
   switch (a) {
-    case 'emoji': App.profile.emoji = t.dataset.e; readProfile(); document.querySelectorAll('.emojis button').forEach((b) => b.classList.toggle('on', b.dataset.e === t.dataset.e)); break;
+    case 'emoji': readProfile(); App.profile.emoji = t.dataset.e; App.profile.photo = null; store.set('profile', App.profile); publishPhoto(); render(); break;
+    case 'pickCamera': readProfile(); $('#camPick').click(); break;
+    case 'pickGallery': readProfile(); $('#filePick').click(); break;
+    case 'clearPhoto': readProfile(); App.profile.photo = null; store.set('profile', App.profile); publishPhoto(); render(); break;
     case 'hostInstead': readProfile(); setScreen('home', {}); break;
     case 'doCreate':
     case 'doJoin': {
-      sfx.unlock(); keepAwake();
+      sfx.unlock(); keepAwake(); micWarmup();
       const name = readProfile();
       if (!name) { toast('Enter your name first.'); $('#nameIn')?.focus(); return; }
       if (a === 'doJoin') {
@@ -1075,7 +1190,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'cancel': teardown(); break;
     case 'rules': closeModal(); openModal(rulesHTML()); break;
-    case 'closeModal': closeModal(); if (v) render(); break;
+    case 'closeModal': closeModal(); returnFlung(); if (v) render(); break;
     case 'mute': sfx.setMuted(!sfx.muted); render(); break;
     case 'testSound': testSound(); break;
     case 'menu': menuSheet(); break;
@@ -1092,7 +1207,9 @@ document.addEventListener('click', async (e) => {
     case 'handSize': act({ type: 'settings', patch: { handSize: Number(t.dataset.v) } }); break;
     case 'start': act({ type: 'start' }); break;
     case 'toLobby': act({ type: 'lobby' }); break;
-    case 'deal': act({ type: 'deal' }); break;
+    case 'dealAll': act({ type: 'dealAll' }); break;
+    case 'dealTo': act({ type: 'dealTo', target: t.dataset.id }); break;
+    case 'dealMode': act({ type: 'dealMode', mode: t.dataset.v }); break;
     case 'autoOn': act({ type: 'auto', on: true, speed: v.dealing?.speed }); break;
     case 'autoOff': act({ type: 'auto', on: false }); break;
     case 'speed': act({ type: 'auto', on: !!v.dealing?.auto, speed: Number(t.dataset.v) }); break;
@@ -1102,7 +1219,7 @@ document.addEventListener('click', async (e) => {
       const card = v.me.hand.find((c) => c.id === id);
       if (!card) return;
       const pd = v.pending;
-      if (v.turn !== App.me || (pd && !(pd.type === 'drawn' && pd.pid === App.me))) { toast('Wait for your turn.', 1400); return; }
+      if (v.turn !== App.me || (pd && !(pd.type === 'drawn' && pd.pid === App.me))) return; // pressing just shows the card
       if (pd && pd.type === 'drawn' && id !== pd.card) { toast('You can only play the card you just drew, or keep it.'); return; }
       if (!canPlay(card, v.top, v.color)) {
         sfx.play('error');
@@ -1130,7 +1247,7 @@ document.addEventListener('click', async (e) => {
     case 'closeTable': if (confirm('Close this table for everyone?')) { closeModal(); closeTable(); } break;
     case 'leave':
       closeModal();
-      if (v && v.phase === 'lobby') act({ type: 'leave' });
+      if (v && v.phase === 'lobby') { act({ type: 'leave' }); if (App.bus) App.bus.publish('av/' + App.me, null, { retain: true }); }
       store.del('last');
       setTimeout(teardown, 300);
       break;
@@ -1152,6 +1269,180 @@ new MutationObserver(() => {
   h.classList.toggle('myturn', !!myTurn);
   h.classList.toggle('many', v.me.hand.length > 12);
 }).observe($('#screen'), { childList: true });
+
+
+// ======================================================================
+// GESTURES — the host flicks cards off the deck; players flick cards from their hand onto the pile
+// ======================================================================
+let gest = null;
+function ghostAt(card, x, y, w, scale = 1.15) {
+  const el = document.createElement('div');
+  el.className = 'flyer ghost';
+  el.style.width = w + 'px';
+  el.style.setProperty('--cw', w + 'px');
+  el.appendChild(cardEl(card));
+  $('#fx').appendChild(el);
+  moveGhost(el, x, y, w, scale, 0);
+  return el;
+}
+function moveGhost(el, x, y, w, scale, rot) {
+  el.style.transform = `translate(${x - w / 2}px, ${y - w * 0.75}px) rotate(${rot}deg) scale(${scale})`;
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.button > 0 || $('#modal.on')) return;
+  const v = App.view;
+  const deck = e.target.closest('#deck.can');
+  if (deck && v && v.phase === 'dealing' && App.mode === 'host') {
+    const c = centerOf(deck.querySelector('.card.top') || deck);
+    gest = { kind: 'deck', x0: e.clientX, y0: e.clientY, t0: performance.now(), w: c.w, el: null, last: [] };
+    e.preventDefault();
+    return;
+  }
+  const cardNode = e.target.closest('#hand .card[data-id]');
+  if (cardNode && v) {
+    const id = Number(cardNode.dataset.id);
+    const card = v.me.hand.find((c) => c.id === id);
+    if (!card) return;
+    cardNode.classList.add('lift'); // pops out so you can see the whole card
+    gest = { kind: 'card', node: cardNode, card, x0: e.clientX, y0: e.clientY, t0: performance.now(), w: cardNode.getBoundingClientRect().width, el: null, last: [], moved: false };
+  }
+});
+document.addEventListener('pointermove', (e) => {
+  if (!gest) return;
+  const dx = e.clientX - gest.x0, dy = e.clientY - gest.y0;
+  gest.last.push({ y: e.clientY, t: performance.now() });
+  if (gest.last.length > 6) gest.last.shift();
+  if (gest.kind === 'card' && !gest.el) {
+    if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy)) { gest.node.classList.remove('lift'); gest = null; return; } // scrolling the hand
+    if (dy > -14) return;
+    gest.node.classList.remove('lift');
+    gest.node.classList.add('hid');
+    gest.el = ghostAt(gest.card, e.clientX, e.clientY, gest.w);
+  }
+  if (gest.kind === 'deck' && !gest.el) {
+    if (Math.hypot(dx, dy) < 10) return;
+    gest.el = ghostAt(null, e.clientX, e.clientY, gest.w, 1.1);
+    sfx.play('click');
+  }
+  if (gest.el) { gest.moved = true; moveGhost(gest.el, e.clientX, e.clientY, gest.w, gest.kind === 'card' ? 1.25 : 1.2, dx * 0.08); }
+}, { passive: true });
+function velocityY(g) {
+  const a = g.last[0], b = g.last[g.last.length - 1];
+  return a && b && b.t > a.t ? (b.y - a.y) / (b.t - a.t) : 0;
+}
+function endGesture(e, cancelled) {
+  const g = gest;
+  gest = null;
+  if (!g) return;
+  const dy = e.clientY - g.y0;
+  const flick = !cancelled && (dy < -70 || velocityY(g) < -0.7);
+  if (g.kind === 'deck') {
+    if (cancelled) { g.el && g.el.remove(); return; }
+    if (!g.el || flick) {
+      if (g.el) { App.flickFrom = { x: e.clientX, y: e.clientY, at: Date.now() }; g.el.remove(); }
+      act({ type: 'deal' });
+    } else {
+      const d = deckPt();
+      g.el.animate([{ transform: g.el.style.transform }, { transform: `translate(${d.x - g.w / 2}px, ${d.y - g.w * 0.75}px)` }], { duration: 200 }).onfinish = () => g.el.remove();
+    }
+    return;
+  }
+  // a card from the hand
+  if (!g.el) { setTimeout(() => g.node.classList.remove('lift'), cancelled ? 0 : 120); return; }
+  const v = App.view;
+  const pd = v && v.pending;
+  const myTurn = v && v.phase === 'play' && v.turn === App.me && (!pd || (pd.type === 'drawn' && pd.pid === App.me));
+  const legal = myTurn && canPlay(g.card, v.top, v.color) && (!pd || pd.card === g.card.id);
+  if (!flick || !legal) {
+    if (flick) { sfx.play('error'); toast(!myTurn ? 'Wait for your turn.' : pd && pd.card !== g.card.id ? 'You can only play the card you just drew.' : 'That card doesn\'t match.', 1600); }
+    const node = g.node;
+    const r = node.getBoundingClientRect();
+    g.el.animate([{ transform: g.el.style.transform }, { transform: `translate(${r.left}px, ${r.top}px)` }], { duration: 220, easing: 'ease-out' }).onfinish = () => { g.el.remove(); node.classList.remove('hid'); };
+    return;
+  }
+  // thrown onto the pile
+  const pl = pilePt();
+  const rot = ((g.card.id * 37) % 16) - 8;
+  const ghostEl = g.el;
+  ghostEl.animate([{ transform: ghostEl.style.transform }, { transform: `translate(${pl.x - g.w / 2}px, ${pl.y - g.w * 0.75}px) rotate(${rot}deg) scale(${pl.w / g.w})` }], { duration: 260, easing: 'cubic-bezier(.2,.8,.3,1)', fill: 'forwards' });
+  sfx.play('draw');
+  App.flung = { id: g.card.id, el: ghostEl, node: g.node, landAt: Date.now() + 260, timer: setTimeout(returnFlung, 5000) };
+  App.ui.sel = null;
+  if (g.card.c === 'w') colorSheet(g.card.id);
+  else act({ type: 'play', card: g.card.id });
+}
+document.addEventListener('pointerup', (e) => endGesture(e, false));
+document.addEventListener('pointercancel', (e) => endGesture(e, true));
+// the flung card bounces back to the hand (wrong move, cancelled colour pick, lost message)
+function returnFlung() {
+  const f = App.flung;
+  if (!f) return;
+  App.flung = null;
+  clearTimeout(f.timer);
+  const node = document.querySelector(`#hand [data-cid="${f.id}"]`);
+  const r = node ? node.getBoundingClientRect() : { left: innerWidth / 2, top: innerHeight - 120 };
+  f.el.animate([{ transform: getComputedStyle(f.el).transform }, { transform: `translate(${r.left}px, ${r.top}px)` }], { duration: 250, fill: 'forwards' }).onfinish = () => { f.el.remove(); paintHand(); };
+}
+
+// ======================================================================
+// MICROPHONE — down to your last card? Say "SATU!" out loud.
+// ======================================================================
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const Mic = { rec: null, on: false, want: false, denied: false, heard: '', lastStart: 0, fails: 0 };
+const SATU_RE = /(^|[^a-z0-9])(s[ae]+\s*-?\s*t+\s*[uoe]+[uow]*|setu|satoo|1|one|sa2)([^a-z0-9]|$)/i;
+const micUsable = () => !!SR && !Mic.denied;
+function micWanted(v) {
+  if (!v || v.phase !== 'play') return false;
+  const meP = P(App.me);
+  if (!meP || meP.called) return false;
+  const n = v.me.hand.length;
+  return n === 1 || (n === 2 && v.turn === App.me);
+}
+function micWarmup() {
+  // ask for the microphone once, while the player is tapping Join/Host, not in the middle of a hand
+  if (!SR || IS_IOS || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+  navigator.mediaDevices.getUserMedia({ audio: true }).then((st) => st.getTracks().forEach((t) => t.stop())).catch(() => { Mic.denied = true; });
+}
+function micSync() {
+  const want = micUsable() && micWanted(App.view);
+  Mic.want = want;
+  if (want && !Mic.on) micStart();
+  if (!want && Mic.on) { try { Mic.rec.abort(); } catch (_) {} Mic.on = false; Mic.heard = ''; }
+}
+function micStart() {
+  if (Date.now() - Mic.lastStart < 600) { setTimeout(micSync, 650); return; }
+  Mic.lastStart = Date.now();
+  let r;
+  try { r = new SR(); } catch (_) { Mic.denied = true; render(); return; }
+  r.lang = 'ms-MY'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 4;
+  r.onresult = (ev) => {
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      for (let k = 0; k < ev.results[i].length; k++) {
+        const t = ev.results[i][k].transcript || '';
+        if (k === 0) Mic.heard = t.slice(-24);
+        if (SATU_RE.test(t)) { heardSatu(); return; }
+      }
+    }
+    const h = $('.mic .heard'); if (h) h.textContent = Mic.heard;
+  };
+  r.onerror = (ev) => {
+    if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(ev.error) || (ev.error === 'network' && ++Mic.fails > 2)) {
+      Mic.denied = true;
+      toast('Microphone not available. Tap the SATU! button instead.', 3500);
+      render();
+    }
+  };
+  r.onend = () => { Mic.on = false; Mic.rec = null; if (Mic.want) setTimeout(micSync, 200); else render(); };
+  try { r.start(); Mic.rec = r; Mic.on = true; } catch (_) { Mic.on = false; }
+  const m = $('.mic'); if (m) m.classList.toggle('on', Mic.on);
+}
+function heardSatu() {
+  Mic.want = false;
+  try { Mic.rec && Mic.rec.abort(); } catch (_) {}
+  Mic.on = false; Mic.heard = '';
+  act({ type: 'shout' });
+}
 
 // ======================================================================
 // start

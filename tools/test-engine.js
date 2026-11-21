@@ -107,6 +107,8 @@ for (const [mode, illegal] of [['accept', false], ['guilty', true], ['innocent',
   rig(g, { hands: [[C('r', '1'), C('r', '2')], [C('b', '1'), C('b', '4')], [C('b', '2')]], top: C('r', '5') });
   g.handle('p0', { type: 'play', card: g.s.players[0].hand[0].id });
   ok(g.s.vulnerable === 'p0', 'forgot SATU = vulnerable');
+  ok(!g.handle('p2', { type: 'catch' }).ok, 'catch blocked during grace');
+  g.s.vulnAt = 0;
   g.handle('p2', { type: 'catch' });
   ok(g.s.players[0].hand.length === 3 && !g.s.vulnerable, 'caught: +2');
 }
@@ -138,6 +140,21 @@ for (const [mode, illegal] of [['accept', false], ['guilty', true], ['innocent',
   rig(g, { hands: [[C('r', 'd2')], [C('b', '9')], [C('b', 's')]], top: C('r', '5') });
   g.handle('p0', { type: 'play', card: g.s.players[0].hand[0].id });
   ok(g.s.phase === 'over' && g.s.players[1].hand.length === 3, 'last card +2 still makes next draw; single round ends game');
+}
+
+// phone-to-phone dealing and deal-all
+{
+  const g = Game.create('T', { id: 'p0', name: 'H' });
+  for (let i = 1; i < 4; i++) g.addPlayer({ id: 'p' + i, name: 'P' + i });
+  g.handle('p0', { type: 'start' });
+  g.handle('p0', { type: 'dealMode', mode: 'phone' });
+  g.handle('p0', { type: 'dealTo', target: 'p2' });
+  let t = 0;
+  for (let i = 0; i < 9; i++) g.handle('p0', { type: 'deal' }, (t += 1000));
+  ok(g.s.players[2].hand.length === 7 && g.s.players[3].hand.length === 2, 'phone mode fills one player then moves on');
+  ok(!g.handle('p0', { type: 'dealTo', target: 'p2' }).ok, 'cannot deal to a full hand');
+  g.handle('p0', { type: 'dealAll' });
+  ok(g.s.phase === 'play' && g.s.players.every((p) => p.hand.length >= 7) && total(g) === 108, 'deal all finishes the deal');
 }
 
 // random full games
