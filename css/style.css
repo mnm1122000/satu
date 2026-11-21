@@ -278,3 +278,22 @@ input { font: inherit; -webkit-user-select: text; user-select: text; }
 .heardtest { color: var(--gold); font-weight: 700; margin-top: 6px; min-height: 20px; }
 
 .hand { width: min(100%, calc(var(--per, 99) * var(--cw) + (var(--per, 99) - 1) * 5px + 16px)); align-self: center; }
+
+/* ---------- one-player-at-a-time dealing ---------- */
+.dealhow { text-align: center; font-size: 13px; color: var(--mut); margin: 6px 0; }
+.dealhow b { color: #fff; }
+.bigdeck.brr .card { animation: brr .07s linear infinite; box-shadow: 0 0 0 5px #6fd3ff, 0 0 40px rgba(111,211,255,.8); }
+@keyframes brr { 0% { transform: translate(0,0); } 25% { transform: translate(-2px,1px); } 50% { transform: translate(2px,-1px); } 75% { transform: translate(-1px,-2px); } }
+
+/* ---------- seats in the lobby ---------- */
+.seatno { width: 26px; height: 26px; border-radius: 50%; background: var(--gold); color: #3a1d00; font-weight: 800; display: grid; place-items: center; font-size: 13px; flex: 0 0 auto; }
+.prow .mv { border: 0; background: rgba(255,255,255,.12); color: #fff; width: 34px; height: 34px; border-radius: 10px; font-size: 14px; cursor: pointer; }
+.prow .mv[disabled] { opacity: .25; }
+.prow .nm .dot { display: inline-block; vertical-align: middle; }
+.minitable { position: relative; height: 190px; margin: 4px 0 12px; }
+.minifelt { position: absolute; inset: 14% 12%; border-radius: 50%; background: radial-gradient(ellipse, var(--felt1), var(--felt2)); box-shadow: inset 0 0 0 4px #6b4220; }
+.miniseat { position: absolute; transform: translate(-50%,-50%); display: flex; flex-direction: column; align-items: center; }
+.miniseat .av { width: 34px; height: 34px; border-radius: 50%; background-color: #2a1d5c; display: grid; place-items: center; font-size: 19px; border: 2px solid rgba(255,255,255,.3); }
+.miniseat span { position: absolute; top: -6px; right: -8px; background: var(--gold); color: #3a1d00; font-size: 10px; font-weight: 800; border-radius: 50%; width: 17px; height: 17px; display: grid; place-items: center; }
+.miniseat i { font-style: normal; font-size: 10px; font-weight: 800; background: rgba(0,0,0,.5); padding: 0 5px; border-radius: 5px; margin-top: 2px; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.minidir { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 11px; font-weight: 800; color: rgba(255,255,255,.7); }

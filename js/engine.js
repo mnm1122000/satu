@@ -141,15 +141,17 @@ export class Game {
     const s = this.s;
     const n = s.players.length;
     s.round++;
-    s.dealer = (s.dealer + 1) % n;
+    // the host's phone always deals; the "dealer" seat (who the first player sits next to) starts at the host and moves round each round
+    s.dealer = s.round === 1 ? Math.max(0, this.idx(s.hostId)) : (s.dealer + 1) % n;
     s.deck = shuffle(buildDeck());
     s.discard = []; s.color = null; s.dir = 1; s.turn = (s.dealer + 1) % n;
     s.pending = null; s.vulnerable = null; s.winner = null; s.lastRound = null;
     for (const p of s.players) { p.hand = []; p.called = false; }
     s.phase = 'dealing';
-    s.deal = { left: s.settings.handSize * n, total: s.settings.handSize * n, pos: (s.dealer + 1) % n, at: 0, auto: false, speed: 420, mode: s.dealMode || 'round' };
+    // one player at a time: fill the player after the host first, the host (the dealer) gets theirs last
+    s.deal = { left: s.settings.handSize * n, total: s.settings.handSize * n, pos: (Math.max(0, this.idx(s.hostId)) + 1) % n, at: 0, auto: false, speed: 420, mode: 'phone' };
     this.emit({ type: 'shuffle' });
-    this.log(`Round ${s.round}: ${s.players[s.dealer].name} shuffles the deck`);
+    this.log(`Round ${s.round}: the host shuffles the deck`);
   }
 
   // next player (from index i, inclusive) who still needs cards
@@ -285,6 +287,13 @@ export class Game {
         if (clean(a.name)) p.name = clean(a.name);
         if (a.emoji) p.emoji = String(a.emoji).slice(0, 8);
         return { ok: true };
+      case 'move': { // host arranges the seats to match the real table
+        if (!host || s.phase !== 'lobby') return err('Seats can only change in the lobby.');
+        const i = this.idx(a.target), j = i + (a.dir < 0 ? -1 : 1);
+        if (i < 0 || j < 0 || j >= s.players.length) return { ok: false };
+        [s.players[i], s.players[j]] = [s.players[j], s.players[i]];
+        return { ok: true };
+      }
       case 'kick':
         if (!host) return err('Only the host can remove players.');
         return { ok: this.removePlayer(a.target) };

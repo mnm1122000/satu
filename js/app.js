@@ -1,7 +1,7 @@
 // SATU! — app: screens, host loop, client flow, dealing & card animations.
-import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, CATCH_GRACE, canPlay, cardName } from './engine.js?v=3';
-import * as net from './net.js?v=3';
-import { sfx, vibrate } from './sfx.js?v=3';
+import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, CATCH_GRACE, canPlay, cardName } from './engine.js?v=4';
+import * as net from './net.js?v=4';
+import { sfx, vibrate } from './sfx.js?v=4';
 
 // ======================================================================
 // utils
@@ -412,7 +412,7 @@ async function handleDn(data) {
 }
 
 function teardown() {
-  clearInterval(App.loop); clearInterval(App.beat); clearTimeout(App.bTimer);
+  clearInterval(App.loop); clearInterval(App.beat); clearTimeout(App.bTimer); stopHoldDeal();
   if (App.bus) App.bus.close();
   Object.assign(App, { mode: null, code: null, me: null, bus: null, game: null, view: null, pubs: {}, keyP: {}, chain: {}, seen: {}, lastSent: {}, ident: null, hostKey: null, bTimer: null });
   App.hidden.clear();
@@ -931,9 +931,14 @@ function rLobby(v) {
       <div id="qr"></div>
       <div class="row"><button class="btn blue" data-act="share">📤 Share link</button><button class="btn ghost" data-act="copy">📋 Copy</button></div>
     </div>
-    <div class="panel"><h3>Players</h3><div class="plist">
-      ${v.players.map((p) => `<div class="prow"><span class="dot ${p.online ? '' : 'off'}"></span>${avHTML(p.id, p.emoji, 'em')}<div class="nm">${esc(p.name)}${p.id === App.me ? ' (you)' : ''}</div>
-        ${p.id === v.hostId ? '<span class="tag">HOST · DEALER</span>' : ''}${host && p.id !== v.hostId ? `<button class="x" data-act="kick" data-id="${esc(p.id)}">✕</button>` : ''}</div>`).join('')}
+    <div class="panel"><h3>Seats</h3>
+      <div class="small" style="margin-bottom:8px">${host ? 'Put everyone in the order they really sit, going <b>to the left (clockwise)</b> around the table. Use ▲▼.' : 'The host sets the seats to match where everyone sits.'}</div>
+      ${seatPreview(v)}
+      <div class="plist">
+      ${v.players.map((p, i) => `<div class="prow"><span class="seatno">${i + 1}</span>${avHTML(p.id, p.emoji, 'em')}<div class="nm"><span class="dot ${p.online ? '' : 'off'}"></span> ${esc(p.name)}${p.id === App.me ? ' (you)' : ''}</div>
+        ${p.id === v.hostId ? '<span class="tag">HOST</span>' : ''}
+        ${host ? `<button class="mv" data-act="move" data-id="${esc(p.id)}" data-d="-1" ${i === 0 ? 'disabled' : ''}>▲</button><button class="mv" data-act="move" data-id="${esc(p.id)}" data-d="1" ${i === v.players.length - 1 ? 'disabled' : ''}>▼</button>` : ''}
+        ${host && p.id !== v.hostId ? `<button class="x" data-act="kick" data-id="${esc(p.id)}">✕</button>` : ''}</div>`).join('')}
     </div>${DEV && host ? '<button class="btn ghost block sm" data-act="addBot">+ Add bot</button>' : ''}</div>
     <div class="panel"><h3>Settings</h3>
       <div class="setrow"><span class="k">Play to</span><div class="chips">${TARGETS.map((t) => `<span class="chip ${s.target === t ? 'on' : ''} ${host ? '' : 'disabled'}" data-act="target" data-v="${t}">${t ? t + ' pts' : '1 round'}</span>`).join('')}</div></div>
@@ -944,6 +949,18 @@ function rLobby(v) {
     ? `<button class="btn primary block big" data-act="start" ${enough ? '' : 'disabled'}>🃏 Shuffle & deal</button>${enough ? '' : `<div class="small center-t" style="margin-top:6px">Waiting for at least ${v.minPlayers} players…</div>`}`
     : '<div class="center-t small" style="padding:12px">Waiting for the host to deal… 🃏</div>'}</div>
   </div>`;
+}
+
+// a small picture of the real table: you at the bottom, play going to your left
+function seatPreview(v) {
+  const n = v.players.length;
+  if (n < 2) return '';
+  const mi = Math.max(0, v.players.findIndex((p) => p.id === App.me));
+  return `<div class="minitable"><div class="minifelt"></div>${v.players.map((p, k) => {
+    const j = (k - mi + n) % n;
+    const ang = Math.PI / 2 + (j * 2 * Math.PI) / n;
+    return `<div class="miniseat" style="left:${50 + 40 * Math.cos(ang)}%;top:${50 + 38 * Math.sin(ang)}%">${avHTML(p.id, p.emoji)}<span>${k + 1}</span><i>${esc(p.id === App.me ? 'You' : p.name)}</i></div>`;
+  }).join('')}<div class="minidir">↻ play goes left</div></div>`;
 }
 
 function dirSVG() {
@@ -978,18 +995,17 @@ function pileHTML(v) {
 
 function rDealScreen(v) {
   const d = v.dealing;
-  const phone = d.mode === 'phone';
   const nm = esc(nameOf(d.to));
   const hs = v.settings.handSize;
+  const ti = v.players.findIndex((p) => p.id === d.to);
+  const need = ti >= 0 ? d.need[ti] : 0;
   return `<div class="game dealscreen">${topbar(v, `Round ${v.round} · dealing · ${d.left} cards left`)}
-    <div class="chips modes"><span class="chip ${!phone ? 'on' : ''}" data-act="dealMode" data-v="round">🔄 Round the table</span><span class="chip ${phone ? 'on' : ''}" data-act="dealMode" data-v="phone">📱 Phone to phone</span></div>
     <div class="who">${v.players.map((p, k) => `<div class="whop ${p.id === d.to ? 'on' : ''} ${d.need[k] <= 0 ? 'full' : ''}" ${d.need[k] > 0 ? `data-act="dealTo" data-id="${esc(p.id)}"` : ''}>
-      ${avHTML(p.id, p.emoji)}<div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="nd">${hs - d.need[k]}/${hs}</div></div>`).join('')}</div>
-    <div class="bigwrap"><div id="bigdeck" class="bigdeck">${d.left > 0 ? cardHTML(null, 'big top') : ''}</div></div>
-    <div class="dealto">${d.to === App.me ? 'Flick ↑ to deal <b>yourself</b>' : phone ? `📱 Phone head to head with <b>${nm}</b>, then flick ↑` : `Flick ↑ (or tap) to deal to <b>${nm}</b>`}</div>
-    <div class="actions">${!phone ? (d.auto ? '<button class="btn sm" data-act="autoOff">⏸ Stop</button>' : '<button class="btn sm blue" data-act="autoOn">▶ Auto deal</button>')
-      + `<div class="chips">${[[700, 'Slow'], [420, 'Normal'], [220, 'Fast']].map(([sp, l]) => `<span class="chip ${d.speed === sp ? 'on' : ''}" data-act="speed" data-v="${sp}">${l}</span>`).join('')}</div>` : ''}
-      <button class="btn sm ghost" data-act="dealAll">⏩ Skip: deal everyone now</button></div>
+      ${avHTML(p.id, p.emoji)}<div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="nd">${d.need[k] <= 0 ? '✓' : `${hs - d.need[k]}/${hs}`}</div></div>`).join('')}</div>
+    <div class="dealto">${d.to === App.me ? 'Last: deal <b>yourself</b>' : `📱 Put your phone head to head with <b>${nm}</b>'s`}</div>
+    <div class="bigwrap"><div id="bigdeck" class="bigdeck ${App.holdDeal ? 'brr' : ''}">${d.left > 0 ? cardHTML(null, 'big top') : ''}</div></div>
+    <div class="dealhow"><b>Flick ↑</b> one card · <b>hold</b> to send all ${need} · tap a player to change</div>
+    <div class="actions"><button class="btn primary" data-act="dealAll">⚡ Auto deal: everyone at once</button></div>
   </div>`;
 }
 
@@ -1142,7 +1158,7 @@ function fitHand() {
   h.style.setProperty('--cw', Math.max(36, best).toFixed(1) + 'px');
   h.dataset.rows = rows;
   // keep cards in sorted order, row by row
-  h.style.setProperty('--per', Math.ceil(n / rows));
+  h.style.setProperty('--per', n ? Math.ceil(n / rows) : 99);
 }
 addEventListener('resize', fitHand);
 
@@ -1330,6 +1346,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'copy': navigator.clipboard?.writeText(inviteLink()).then(() => toast('Invite link copied.'), () => toast(inviteLink())); break;
     case 'kick': act({ type: 'kick', target: t.dataset.id }); break;
+    case 'move': act({ type: 'move', target: t.dataset.id, dir: Number(t.dataset.d) }); break;
     case 'addBot': addBot(); break;
     case 'target': act({ type: 'settings', patch: { target: Number(t.dataset.v) } }); break;
     case 'handSize': act({ type: 'settings', patch: { handSize: Number(t.dataset.v) } }); break;
@@ -1423,6 +1440,8 @@ document.addEventListener('pointerdown', (e) => {
   if (deck && v && v.phase === 'dealing' && App.mode === 'host' && deck.querySelector('.card')) {
     const c = centerOf(deck.querySelector('.card') || deck);
     gest = { kind: 'deck', x0: e.clientX, y0: e.clientY, t0: performance.now(), w: c.w, el: null, last: [] };
+    const g = gest;
+    g.holdT = setTimeout(() => { if (gest === g && !g.el) startHoldDeal(g); }, 380);
     e.preventDefault();
     return;
   }
@@ -1447,8 +1466,10 @@ document.addEventListener('pointermove', (e) => {
     gest.node.classList.add('hid');
     gest.el = ghostAt(gest.card, e.clientX, e.clientY, gest.w);
   }
+  if (gest.kind === 'deck' && gest.hold) return;
   if (gest.kind === 'deck' && !gest.el) {
     if (Math.hypot(dx, dy) < 10) return;
+    clearTimeout(gest.holdT);
     gest.el = ghostAt(null, e.clientX, e.clientY, gest.w, 1.1);
     sfx.play('click');
   }
@@ -1465,6 +1486,8 @@ function endGesture(e, cancelled) {
   const dy = e.clientY - g.y0;
   const flick = !cancelled && (dy < -70 || velocityY(g) < -0.7);
   if (g.kind === 'deck') {
+    clearTimeout(g.holdT);
+    if (g.hold) { stopHoldDeal(); return; }
     if (cancelled) { g.el && g.el.remove(); return; }
     if (!g.el || flick) {
       if (g.el) { App.flickFrom = { x: e.clientX, y: e.clientY, at: Date.now() }; g.el.remove(); }
@@ -1501,6 +1524,26 @@ function endGesture(e, cancelled) {
 }
 document.addEventListener('pointerup', (e) => endGesture(e, false));
 document.addEventListener('pointercancel', (e) => endGesture(e, true));
+// holding the deck streams cards to the chosen player (brrrr) and stops when their hand is full
+function startHoldDeal(g) {
+  const v = App.view;
+  if (!v || !v.dealing) return;
+  g.hold = true;
+  const target = v.dealing.to;
+  App.holdDeal = setInterval(() => {
+    const cur = App.view;
+    if (!cur || cur.phase !== 'dealing' || !cur.dealing || cur.dealing.to !== target) { stopHoldDeal(); return; }
+    act({ type: 'deal' });
+  }, 150);
+  $('#bigdeck')?.classList.add('brr');
+  vibrate([30, 30, 30]);
+}
+function stopHoldDeal() {
+  clearInterval(App.holdDeal);
+  App.holdDeal = null;
+  $('#bigdeck')?.classList.remove('brr');
+}
+
 // the flung card bounces back to the hand (wrong move, cancelled colour pick, lost message)
 function returnFlung() {
   const f = App.flung;

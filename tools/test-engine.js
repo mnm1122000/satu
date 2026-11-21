@@ -157,6 +157,20 @@ for (const [mode, illegal] of [['accept', false], ['guilty', true], ['innocent',
   ok(g.s.phase === 'play' && g.s.players.every((p) => p.hand.length >= 7) && total(g) === 108, 'deal all finishes the deal');
 }
 
+// one player at a time, host last; host can re-seat players in the lobby
+{
+  const g = Game.create('T', { id: 'p0', name: 'H' });
+  for (let i = 1; i < 4; i++) g.addPlayer({ id: 'p' + i, name: 'P' + i });
+  g.handle('p0', { type: 'move', target: 'p3', dir: -1 });
+  ok(g.s.players.map((p) => p.id).join() === 'p0,p1,p3,p2', 'host moves a seat');
+  ok(!g.handle('p1', { type: 'move', target: 'p1', dir: 1 }).ok, 'players cannot move seats');
+  g.handle('p0', { type: 'start' });
+  const order = [];
+  let t = 0;
+  while (g.s.phase === 'dealing') { const before = g.s.players.map((p) => p.hand.length); g.handle('p0', { type: 'deal' }, (t += 1000)); const k = g.s.players.findIndex((p, i) => p.hand.length > before[i]); if (order[order.length - 1] !== g.s.players[k].id) order.push(g.s.players[k].id); }
+  ok(order.join() === 'p1,p3,p2,p0', 'deals each player in full, in seat order, host last: ' + order.join());
+}
+
 // random full games
 function bot(g) {
   const s = g.s, c = s.players[s.turn];
