@@ -1,7 +1,7 @@
 // SATU! — app: screens, host loop, client flow, dealing & card animations.
-import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, CATCH_GRACE, canPlay, cardName } from './engine.js?v=4';
-import * as net from './net.js?v=4';
-import { sfx, vibrate } from './sfx.js?v=4';
+import { Game, COLORS, COLOR_NAME, MIN_PLAYERS, MAX_PLAYERS, TARGETS, HAND_SIZES, WINNERS, CATCH_GRACE, canPlay, cardName } from './engine.js?v=5';
+import * as net from './net.js?v=5';
+import { sfx, vibrate } from './sfx.js?v=5';
 
 // ======================================================================
 // utils
@@ -20,7 +20,22 @@ const store = {
   set(k, v) { try { localStorage.setItem('satu_' + k + SLOT, JSON.stringify(v)); } catch (_) {} },
   del(k) { try { localStorage.removeItem('satu_' + k + SLOT); } catch (_) {} },
 };
-const EMOJIS = ['😎', '🤠', '🦊', '🐼', '🐯', '🐸', '🦄', '🐙', '👻', '🤖', '👽', '🐵', '🦁', '🐧', '🍉', '🌶️', '🔥', '⭐'];
+// avatar colours (no emoji): a player without a photo is their initial on one of these
+const AV_COLORS = ['#ef3b36', '#ff8a1a', '#ffc21a', '#1fb35b', '#14b8a6', '#1e7bff', '#7c4dff', '#e0115f'];
+const EMOJIS = AV_COLORS.map((_, i) => 'c' + i); // stored in the player's "emoji" field as c0..c7
+// small line icons (SVG, follow the text colour)
+const ICO = {
+  sound: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
+  mute: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l5 6M22 9l-5 6"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
+  image: '<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M5 18l5-5 3 3 2-2 4 4"/>',
+  share: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/>',
+  copy: '<rect x="8" y="8" width="11" height="12" rx="2"/><path d="M5 16V5a1 1 0 0 1 1-1h9"/>',
+  book: '<path d="M5 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H5zM19 4h-6"/><path d="M19 4v14h-6"/>',
+};
+const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICO[k]}</svg>`;
 const COLOR_HEX = { r: '#ef3b36', y: '#ffc21a', g: '#1fb35b', b: '#1e7bff' };
 const COLOR_ORDER = { r: 0, y: 1, g: 2, b: 3, w: 4 };
 const VAL_ORDER = (v) => (/^\d$/.test(v) ? Number(v) : { s: 10, r: 11, d2: 12, w: 13, w4: 14 }[v]);
@@ -44,7 +59,7 @@ const App = {
   game: null, hostKeys: null, pubs: {}, keyP: {}, chain: {}, seen: {}, lastSent: {},
   ident: null, hostKey: null, hostPub: null,
   view: null, lastViewAt: 0,
-  profile: store.get('profile', { name: '', emoji: EMOJIS[Math.floor(Math.random() * EMOJIS.length)] }),
+  profile: (() => { const pr = store.get('profile', { name: '' }); if (!/^c\d$/.test(pr.emoji || '')) pr.emoji = EMOJIS[Math.floor(Math.random() * EMOJIS.length)]; return pr; })(),
   screen: 'home', screenData: {},
   ui: { sel: null },
   hidden: new Set(), pileHide: null,
@@ -52,16 +67,25 @@ const App = {
   vulnSeen: {}, flung: null, flickFrom: null,
 };
 const P = (id) => App.view && App.view.players.find((p) => p.id === id);
+const ORD = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
 const nameOf = (id) => (id === App.me ? 'You' : P(id)?.name || '?');
 
 // ======================================================================
 // profile photos (selfie / gallery) — shared on a retained relay topic per player
 // ======================================================================
 App.avatars = {};
+function avColor(key, id = '') {
+  const m = /^c(\d)$/.exec(key || '');
+  if (m) return AV_COLORS[Number(m[1]) % AV_COLORS.length];
+  let h = 0; for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AV_COLORS[h % AV_COLORS.length];
+}
 function avHTML(id, emoji, cls = 'av') {
   const img = id === App.me ? App.profile.photo || App.avatars[id] : App.avatars[id];
-  return img ? `<div class="${cls} photo" data-av="${esc(id)}" style="background-image:url('${img}')"></div>`
-    : `<div class="${cls}" data-av="${esc(id)}">${esc(emoji || '🙂')}</div>`;
+  if (img) return `<div class="${cls} photo" data-av="${esc(id)}" style="background-image:url('${img}')"></div>`;
+  const name = id === App.me ? App.profile.name : (P(id)?.name || '');
+  const ini = (name.trim()[0] || '?').toUpperCase();
+  return `<div class="${cls} ini" data-av="${esc(id)}" style="background:${avColor(emoji, id)}">${esc(ini)}</div>`;
 }
 function fileToPhoto(file) {
   return new Promise((resolve, reject) => {
@@ -122,7 +146,7 @@ function testSound() {
   if (sfx.muted) sfx.setMuted(false);
   setTimeout(() => { sfx.play('trrr'); sfx.play('win', { delay: 0.35 }); }, 60);
   vibrate([120, 60, 120]);
-  setTimeout(() => toast(sfx.ready ? '🔊 Sound is ON. Hear nothing? Raise the media volume and turn Silent mode off.' : '⚠️ Sound is blocked. Tap again.', 5000), 700);
+  setTimeout(() => toast(sfx.ready ? 'Sound is ON. Hear nothing? Raise the media volume and turn Silent mode off.' : 'Sound is blocked. Tap again.', 5000), 700);
 }
 
 // ======================================================================
@@ -658,6 +682,14 @@ function onFx(e) {
       sfx.play(e.guilty ? 'catch' : 'error');
       burst(seatPt(e.guilty ? e.target : e.by), e.guilty ? 'BUSTED! +4' : 'CLEAN! +6', 'bad', 1600);
       break;
+    case 'out': {
+      const P0 = P(e.by);
+      if (P0) { P0.place = e.place; P0.count = 0; }
+      sfx.play('satu');
+      setTimeout(() => burst(seatPt(e.by), `${ORD(e.place)} OUT!`, 'satu', 1800), 350);
+      if (e.by === me) { confetti(); vibrate([80, 40, 80]); }
+      break;
+    }
     case 'round':
       setTimeout(() => { sfx.play('win'); confetti(); if (e.winner === me) vibrate([100, 50, 100, 50, 300]); }, 500);
       break;
@@ -874,31 +906,31 @@ function rHome() {
       <div class="logo-title">SATU!</div>
       <div class="tagline">Every phone is a hand. The host deals. Shout SATU! on your last card.</div>
     </div>
-    ${canResume ? `<button class="btn primary block big" data-act="resumeHost">▶ Resume hosting ${esc(saved.code)}</button>` : ''}
-    ${canRejoin && !code ? `<button class="btn blue block" data-act="rejoin">↩ Rejoin table ${esc(last.code)}</button>` : ''}
+    ${canResume ? `<button class="btn primary block big" data-act="resumeHost">Resume hosting ${esc(saved.code)}</button>` : ''}
+    ${canRejoin && !code ? `<button class="btn blue block" data-act="rejoin">Rejoin table ${esc(last.code)}</button>` : ''}
     <div class="panel">
       <h3>You</h3>
       <div class="me-row">
-        <div class="me-av ${pr.photo ? 'photo' : ''}" data-act="pickGallery" style="${pr.photo ? `background-image:url('${pr.photo}')` : ''}">${pr.photo ? '' : esc(pr.emoji)}</div>
-        <div class="me-btns"><button class="btn sm" data-act="pickCamera">📸 Take photo</button><button class="btn sm" data-act="pickGallery">🖼️ Gallery</button>${pr.photo ? '<button class="btn sm ghost" data-act="clearPhoto">✕ Use emoji</button>' : ''}</div>
+        <div class="me-av ${pr.photo ? 'photo' : 'ini'}" data-act="pickGallery" style="${pr.photo ? `background-image:url('${pr.photo}')` : `background:${avColor(pr.emoji)}`}">${pr.photo ? '' : esc((pr.name.trim()[0] || '?').toUpperCase())}</div>
+        <div class="me-btns"><button class="btn sm" data-act="pickCamera">${ico('camera')} Take photo</button><button class="btn sm" data-act="pickGallery">${ico('image')} Gallery</button>${pr.photo ? '<button class="btn sm ghost" data-act="clearPhoto">Remove photo</button>' : ''}</div>
       </div>
       <input id="nameIn" class="field" maxlength="16" placeholder="Your name" value="${esc(pr.name)}" autocomplete="off">
-      <div class="emojis">${EMOJIS.map((e) => `<button data-act="emoji" data-e="${e}" class="${e === pr.emoji && !pr.photo ? 'on' : ''}">${e}</button>`).join('')}</div>
+      <div class="swatches">${pr.photo ? '' : EMOJIS.map((e) => `<button data-act="emoji" data-e="${e}" class="${e === pr.emoji ? 'on' : ''}" style="background:${avColor(e)}" aria-label="colour"></button>`).join('')}</div>
     </div>
     ${code ? `
     <div class="panel">
       <h3>Join table</h3>
       <input id="codeIn" class="field code-field" maxlength="5" value="${esc(code)}" autocomplete="off" inputmode="latin" spellcheck="false">
-      <button class="btn primary block big" data-act="doJoin">🃏 Join table</button>
+      <button class="btn primary block big" data-act="doJoin">Join table</button>
       <button class="btn ghost block" data-act="hostInstead">Host a new table instead</button>
     </div>` : `
-    <button class="btn primary block big" data-act="doCreate" style="margin-top:16px">👑 Host a table</button>
+    <button class="btn primary block big" data-act="doCreate" style="margin-top:16px">Host a table</button>
     <div class="panel">
       <h3>Join a table</h3>
       <div class="row"><input id="codeIn" class="field code-field" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false"><button class="btn blue" style="flex:0 0 auto" data-act="doJoin">Join</button></div>
       <div class="small" style="margin-top:8px">Or scan the QR code on the host's phone.</div>
     </div>`}
-    <div class="row" style="margin-top:12px"><button class="btn ghost" data-act="rules">📖 Rules</button><button class="btn ghost" data-act="testSound">🔊 Sound</button><button class="btn ghost" data-act="micSetup">🎙 Mic</button></div>
+    <div class="row" style="margin-top:12px"><button class="btn ghost" data-act="rules">${ico('book')} Rules</button><button class="btn ghost" data-act="testSound">${ico('sound')} Sound</button><button class="btn ghost" data-act="micSetup">${ico('mic')} Mic</button></div>
     <div class="made">Made by mnm <span class="beta">BETA</span></div>
   </div>`;
 }
@@ -910,7 +942,7 @@ function rConnecting() {
 
 function topbar(v, sub) {
   return `<div class="topbar"><div class="t"><b class="brand">SATU!</b> <span class="small">· ${esc(v.code)}</span><div class="small">${sub}</div></div>
-    <button class="iconbtn" data-act="mute">${sfx.muted ? '🔇' : '🔊'}</button><button class="iconbtn" data-act="menu">☰</button></div>`;
+    <button class="iconbtn" data-act="mute">${ico(sfx.muted ? 'mute' : 'sound')}</button><button class="iconbtn" data-act="menu">${ico('menu')}</button></div>`;
 }
 
 function rGame(v) {
@@ -929,38 +961,57 @@ function rLobby(v) {
       <div class="lbl">TABLE CODE</div>
       <div class="code">${esc(v.code)}</div>
       <div id="qr"></div>
-      <div class="row"><button class="btn blue" data-act="share">📤 Share link</button><button class="btn ghost" data-act="copy">📋 Copy</button></div>
+      <div class="row"><button class="btn blue" data-act="share">${ico('share')} Share link</button><button class="btn ghost" data-act="copy">${ico('copy')} Copy</button></div>
     </div>
     <div class="panel"><h3>Seats</h3>
-      <div class="small" style="margin-bottom:8px">${host ? 'Put everyone in the order they really sit, going <b>to the left (clockwise)</b> around the table. Use ▲▼.' : 'The host sets the seats to match where everyone sits.'}</div>
-      ${seatPreview(v)}
+      <div class="small" style="margin-bottom:8px">${host ? 'Drag everyone to <b>where they really sit</b> around your table. Turns go clockwise from the seats.' : 'The host puts everyone where they really sit.'}</div>
+      ${host && v.players.length >= 2 ? `<div class="chips" style="margin-bottom:6px"><span class="chip ${(s.shape || 'round') === 'round' ? 'on' : ''}" data-act="shape" data-v="round">Round table</span><span class="chip ${s.shape === 'long' ? 'on' : ''}" data-act="shape" data-v="long">Long table</span><span class="chip" data-act="arrReset">Even spacing</span></div>` : ''}
+      ${v.players.length >= 2 ? arrangerHTML(v) : ''}
       <div class="plist">
       ${v.players.map((p, i) => `<div class="prow"><span class="seatno">${i + 1}</span>${avHTML(p.id, p.emoji, 'em')}<div class="nm"><span class="dot ${p.online ? '' : 'off'}"></span> ${esc(p.name)}${p.id === App.me ? ' (you)' : ''}</div>
         ${p.id === v.hostId ? '<span class="tag">HOST</span>' : ''}
-        ${host ? `<button class="mv" data-act="move" data-id="${esc(p.id)}" data-d="-1" ${i === 0 ? 'disabled' : ''}>▲</button><button class="mv" data-act="move" data-id="${esc(p.id)}" data-d="1" ${i === v.players.length - 1 ? 'disabled' : ''}>▼</button>` : ''}
         ${host && p.id !== v.hostId ? `<button class="x" data-act="kick" data-id="${esc(p.id)}">✕</button>` : ''}</div>`).join('')}
     </div>${DEV && host ? '<button class="btn ghost block sm" data-act="addBot">+ Add bot</button>' : ''}</div>
     <div class="panel"><h3>Settings</h3>
       <div class="setrow"><span class="k">Play to</span><div class="chips">${TARGETS.map((t) => `<span class="chip ${s.target === t ? 'on' : ''} ${host ? '' : 'disabled'}" data-act="target" data-v="${t}">${t ? t + ' pts' : '1 round'}</span>`).join('')}</div></div>
+      <div class="setrow"><span class="k">Round ends</span><div class="chips">${WINNERS.map((w) => `<span class="chip ${(s.winners ?? 1) === w ? 'on' : ''} ${host ? '' : 'disabled'}" data-act="winners" data-v="${w}">${w === 0 ? 'Last one left' : `After ${ORD(w)} out`}</span>`).join('')}</div></div>
+      <div class="small setnote">${(s.winners ?? 1) === 1 ? 'Classic: the first player out of cards ends the round.' : (s.winners ?? 1) === 0 ? 'Everyone keeps playing until only one player still has cards.' : `The round keeps going until ${s.winners} players are out of cards.`} Places score the leftover cards: 1st all, 2nd half, 3rd a quarter…</div>
       <div class="setrow"><span class="k">Cards each</span><div class="chips">${HAND_SIZES.map((n) => `<span class="chip ${s.handSize === n ? 'on' : ''} ${host ? '' : 'disabled'}" data-act="handSize" data-v="${n}">${n}</span>`).join('')}</div></div>
     </div>
   </div>
   <div class="sticky-bottom">${host
-    ? `<button class="btn primary block big" data-act="start" ${enough ? '' : 'disabled'}>🃏 Shuffle & deal</button>${enough ? '' : `<div class="small center-t" style="margin-top:6px">Waiting for at least ${v.minPlayers} players…</div>`}`
-    : '<div class="center-t small" style="padding:12px">Waiting for the host to deal… 🃏</div>'}</div>
+    ? `<button class="btn primary block big" data-act="start" ${enough ? '' : 'disabled'}>Shuffle & deal</button>${enough ? '' : `<div class="small center-t" style="margin-top:6px">Waiting for at least ${v.minPlayers} players…</div>`}`
+    : '<div class="center-t small" style="padding:12px">Waiting for the host to deal…</div>'}</div>
   </div>`;
 }
 
-// a small picture of the real table: you at the bottom, play going to your left
-function seatPreview(v) {
+// Where each player sits, as an angle around the table. If the host arranged the real seats we keep
+// those angles (and the gaps between people); otherwise everyone is spaced evenly. Each phone turns the
+// table so its own seat is at the bottom.
+function seatAngles(v) {
   const n = v.players.length;
-  if (n < 2) return '';
-  const mi = Math.max(0, v.players.findIndex((p) => p.id === App.me));
-  return `<div class="minitable"><div class="minifelt"></div>${v.players.map((p, k) => {
-    const j = (k - mi + n) % n;
-    const ang = Math.PI / 2 + (j * 2 * Math.PI) / n;
-    return `<div class="miniseat" style="left:${50 + 40 * Math.cos(ang)}%;top:${50 + 38 * Math.sin(ang)}%">${avHTML(p.id, p.emoji)}<span>${k + 1}</span><i>${esc(p.id === App.me ? 'You' : p.name)}</i></div>`;
-  }).join('')}<div class="minidir">↻ play goes left</div></div>`;
+  const seats = v.settings.seats || {};
+  const all = n > 1 && v.players.every((p) => seats[p.id]);
+  const raw = {};
+  v.players.forEach((p, k) => { raw[p.id] = all ? Math.atan2(seats[p.id][1] - 0.5, seats[p.id][0] - 0.5) : (k * 2 * Math.PI) / n; });
+  const mine = raw[App.me] ?? raw[v.players[0]?.id] ?? 0;
+  const out = {};
+  for (const p of v.players) out[p.id] = Math.PI / 2 + raw[p.id] - mine;
+  return out;
+}
+function arrangeDefault(v) {
+  const seats = {};
+  const n = v.players.length;
+  v.players.forEach((p, k) => { const a = Math.PI / 2 + (k * 2 * Math.PI) / n; seats[p.id] = [0.5 + 0.42 * Math.cos(a), 0.5 + 0.4 * Math.sin(a)]; });
+  return seats;
+}
+function arrangerHTML(v) {
+  const host = App.mode === 'host';
+  const seats = App.arrDrag ? App.arrDrag.seats : (v.settings.seats && v.players.every((p) => v.settings.seats[p.id]) ? v.settings.seats : arrangeDefault(v));
+  const long = v.settings.shape === 'long';
+  return `<div class="arranger ${long ? 'long' : ''} ${host ? 'host' : ''}" id="arranger"><div class="arr-felt"></div>
+    ${v.players.map((p, k) => { const [x, y] = seats[p.id] || [0.5, 0.5]; return `<div class="arr-seat" data-pid="${esc(p.id)}" style="left:${x * 100}%;top:${y * 100}%">${avHTML(p.id, p.emoji)}<span>${k + 1}</span><i>${esc(p.id === App.me ? 'You' : p.name)}</i></div>`; }).join('')}
+    <div class="arr-mid">↻ turns go clockwise<br><small>${host ? 'drag people to their real seats' : 'the host places everyone'}</small></div></div>`;
 }
 
 function dirSVG() {
@@ -970,19 +1021,18 @@ function dirSVG() {
 }
 
 function seatsHTML(v) {
-  const n = v.players.length;
-  const mi = Math.max(0, v.players.findIndex((p) => p.id === App.me));
+  const angs = seatAngles(v);
+  const long = v.settings.shape === 'long';
   const dealTo = v.dealing ? v.dealing.to : null;
   const turnId = v.pending && v.pending.type === 'challenge' ? v.pending.pid : v.turn;
   return v.players.map((p, k) => {
-    const j = (k - mi + n) % n;
-    const ang = Math.PI / 2 + (j * 2 * Math.PI) / n; // me at the bottom, play order runs clockwise
-    const x = 50 + 43 * Math.cos(ang), y = 50 + 41 * Math.sin(ang);
-    const cls = [p.id === turnId ? 'turn' : '', p.id === dealTo ? 'dealto' : '', p.online === false ? 'off' : '', v.vulnerable === p.id ? 'vuln' : ''].join(' ');
+    const ang = angs[p.id]; // me at the bottom, play order runs clockwise
+    const x = 50 + (long ? 46 : 43) * Math.cos(ang), y = 50 + (long ? 38 : 41) * Math.sin(ang);
+    const cls = [p.place ? 'done' : '', p.id === turnId ? 'turn' : '', p.id === dealTo ? 'dealto' : '', p.online === false ? 'off' : '', v.vulnerable === p.id ? 'vuln' : ''].join(' ');
     const pick = v.phase === 'dealing' && App.mode === 'host' && v.dealing && v.dealing.need[k] > 0;
     return `<div class="seat ${cls}" data-seat="${esc(p.id)}" ${pick ? `data-act="dealTo" data-id="${esc(p.id)}"` : ''} style="left:${x}%;top:${y}%">
       ${avHTML(p.id, p.emoji)}<div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="cc">${p.count}</div>
-      ${p.called && p.count <= 2 && p.count > 0 ? '<div class="satu-b">SATU!</div>' : ''}${p.id === v.dealer ? '<div class="dealer">D</div>' : ''}</div>`;
+      ${p.place ? `<div class="placeb">${ORD(p.place)}</div>` : ''}${p.called && p.count <= 2 && p.count > 0 ? '<div class="satu-b">SATU!</div>' : ''}${p.id === v.dealer ? '<div class="dealer">D</div>' : ''}</div>`;
   }).join('');
 }
 
@@ -1002,10 +1052,10 @@ function rDealScreen(v) {
   return `<div class="game dealscreen">${topbar(v, `Round ${v.round} · dealing · ${d.left} cards left`)}
     <div class="who">${v.players.map((p, k) => `<div class="whop ${p.id === d.to ? 'on' : ''} ${d.need[k] <= 0 ? 'full' : ''}" ${d.need[k] > 0 ? `data-act="dealTo" data-id="${esc(p.id)}"` : ''}>
       ${avHTML(p.id, p.emoji)}<div class="nm">${esc(p.id === App.me ? 'You' : p.name)}</div><div class="nd">${d.need[k] <= 0 ? '✓' : `${hs - d.need[k]}/${hs}`}</div></div>`).join('')}</div>
-    <div class="dealto">${d.to === App.me ? 'Last: deal <b>yourself</b>' : `📱 Put your phone head to head with <b>${nm}</b>'s`}</div>
+    <div class="dealto">${d.to === App.me ? 'Last: deal <b>yourself</b>' : `Put your phone head to head with <b>${nm}</b>'s`}</div>
     <div class="bigwrap"><div id="bigdeck" class="bigdeck ${App.holdDeal ? 'brr' : ''}">${d.left > 0 ? cardHTML(null, 'big top') : ''}</div></div>
     <div class="dealhow"><b>Flick ↑</b> one card · <b>hold</b> to send all ${need} · tap a player to change</div>
-    <div class="actions"><button class="btn primary" data-act="dealAll">⚡ Auto deal: everyone at once</button></div>
+    <div class="actions"><button class="btn primary" data-act="dealAll">Auto deal: everyone at once</button></div>
   </div>`;
 }
 
@@ -1018,7 +1068,7 @@ function rTable(v) {
   const bump = dealing && !host && v.dealing && v.dealing.mode === 'phone' && v.dealing.to === App.me;
   const sub = dealing ? `Round ${v.round} · dealing` : `Round ${v.round} · ${v.settings.target ? 'to ' + v.settings.target : 'single round'}`;
   return `<div class="game">${topbar(v, sub)}
-    ${bump ? '<div class="bump">⬆ Put the top of your phone against the host\'s phone ⬆</div>' : ''}
+    ${bump ? '<div class="bump">↑ Put the top of your phone against the host\'s phone ↑</div>' : ''}
     <div id="table" class="table">
       <div class="felt"></div>
       <div class="dirring ${v.dir < 0 ? 'ccw' : ''}">${dirSVG()}</div>
@@ -1049,11 +1099,11 @@ function statusHTML(v) {
     const need = d && ti >= 0 ? d.need[ti] : 0;
     if (App.mode === 'host') {
       main = d.to === App.me ? `Deal yourself · ${need} more` : phone
-        ? `📱 Phone head-to-head with <b>${esc(nameOf(d.to))}</b>, flick ↑ · ${need} more`
+        ? `Phone head to head with <b>${esc(nameOf(d.to))}</b>, flick ↑ · ${need} more`
         : `Flick or tap the deck → <b>${esc(nameOf(d.to))}</b> · ${d.left} left`;
     } else {
       me = phone && d.to === App.me;
-      main = me ? `📱 Touch your phone's top to the host's phone!` : `🃏 Dealing to ${esc(nameOf(d.to))}… ${d.left} left`;
+      main = me ? `Touch your phone's top to the host's phone!` : `Dealing to ${esc(nameOf(d.to))}… ${d.left} left`;
     }
   } else if (pd && pd.type === 'challenge') {
     me = pd.pid === App.me;
@@ -1061,6 +1111,9 @@ function statusHTML(v) {
   } else if (pd && pd.type === 'color') {
     me = pd.pid === App.me;
     main = me ? 'Pick the first colour' : `${esc(nameOf(pd.pid))} is picking the first colour`;
+  } else if (P(App.me)?.place && v.phase === 'play') {
+    me = true;
+    main = `You finished ${ORD(P(App.me).place)}! Watch the others`;
   } else if (v.turn === App.me) {
     me = true;
     main = pd && pd.type === 'drawn' ? 'Play the card you drew, or keep it' : 'Your turn!';
@@ -1076,12 +1129,12 @@ function actionsHTML(v) {
   if (v.phase === 'dealing') {
     if (host) {
       const d = v.dealing;
-      out.push(`<div class="chips"><span class="chip ${d.mode !== 'phone' ? 'on' : ''}" data-act="dealMode" data-v="round">🔄 Round the table</span><span class="chip ${d.mode === 'phone' ? 'on' : ''}" data-act="dealMode" data-v="phone">📱 Phone to phone</span></div>`);
+      out.push(`<div class="chips"><span class="chip ${d.mode !== 'phone' ? 'on' : ''}" data-act="dealMode" data-v="round">Round the table</span><span class="chip ${d.mode === 'phone' ? 'on' : ''}" data-act="dealMode" data-v="phone">Phone to phone</span></div>`);
       if (d.mode !== 'phone') {
-        out.push(d.auto ? '<button class="btn sm" data-act="autoOff">⏸ Stop</button>' : '<button class="btn sm blue" data-act="autoOn">▶ Auto deal</button>');
+        out.push(d.auto ? '<button class="btn sm" data-act="autoOff">Stop</button>' : '<button class="btn sm blue" data-act="autoOn">Auto deal</button>');
         out.push(`<div class="chips">${[[700, 'Slow'], [420, 'Normal'], [220, 'Fast']].map(([sp, l]) => `<span class="chip ${d.speed === sp ? 'on' : ''}" data-act="speed" data-v="${sp}">${l}</span>`).join('')}</div>`);
       } else out.push('<div class="small">Tap a player to choose who gets cards next.</div>');
-      out.push('<button class="btn sm ghost" data-act="dealAll">⏩ Skip: deal everyone now</button>');
+      out.push('<button class="btn sm ghost" data-act="dealAll">Skip: deal everyone now</button>');
     }
     return out.join('');
   }
@@ -1090,15 +1143,15 @@ function actionsHTML(v) {
   const myTurn = v.turn === App.me;
   const meP = P(App.me);
   if (myTurn && !pd) out.push('<button class="btn blue" data-act="draw">🂠 Draw</button>');
-  if (myTurn && pd && pd.type === 'drawn' && pd.pid === App.me) out.push('<button class="btn" data-act="pass">✋ Keep it</button>');
+  if (myTurn && pd && pd.type === 'drawn' && pd.pid === App.me) out.push('<button class="btn" data-act="pass">Keep it</button>');
   if (meP && v.me.hand.length <= 2 && v.me.hand.length > 0 && !meP.called) {
-    if (micUsable() && micWanted(v)) out.push(`<div class="mic ${Mic.on ? 'on' : ''}"><span class="dotrec"></span>🎙 Say “SATU!” <span class="heard">${esc(Mic.heard)}</span></div>`);
+    if (micUsable() && micWanted(v)) out.push(`<div class="mic ${Mic.on ? 'on' : ''}"><span class="dotrec"></span>${ico('mic')} Say “SATU!” <span class="heard">${esc(Mic.heard)}</span></div>`);
     else if (!micUsable()) out.push(`<button class="btn satu ${v.me.hand.length === 2 && myTurn ? 'pulse' : ''}" data-act="shout">SATU!</button>`);
   }
   if (v.vulnerable && v.vulnerable !== App.me) {
     if (App.vulnSeen.id !== v.vulnerable) { App.vulnSeen = { id: v.vulnerable, at: Date.now() }; setTimeout(render, CATCH_GRACE + 50); }
-    if (Date.now() - App.vulnSeen.at >= CATCH_GRACE) out.push(`<button class="btn catch pulse" data-act="catch">🚨 Catch ${esc(nameOf(v.vulnerable))}! (no SATU)</button>`);
-    else out.push(`<div class="small">⏳ ${esc(nameOf(v.vulnerable))} has 1 card… did they say SATU?</div>`);
+    if (Date.now() - App.vulnSeen.at >= CATCH_GRACE) out.push(`<button class="btn catch pulse" data-act="catch">Catch ${esc(nameOf(v.vulnerable))}! (no SATU)</button>`);
+    else out.push(`<div class="small">${esc(nameOf(v.vulnerable))} has 1 card… did they say SATU?</div>`);
   }
   if (pd && pd.type === 'challenge' && pd.pid === App.me && App.modalKind !== 'challenge') out.push('<button class="btn primary" data-act="openChallenge">Decide on +4</button>');
   if (pd && pd.type === 'color' && pd.pid === App.me && App.modalKind !== 'color') out.push('<button class="btn primary" data-act="openColor">Pick colour</button>');
@@ -1117,7 +1170,7 @@ function handInner(v) {
   const pd = v.pending;
   const drawnOnly = pd && pd.type === 'drawn' && pd.pid === App.me ? pd.card : null;
   const hand = sortHand(v.me.hand);
-  if (!hand.length) return `<div class="empty">${v.phase === 'dealing' ? 'Your cards will fly in here…' : 'No cards'}</div>`;
+  if (!hand.length) return `<div class="empty">${v.phase === 'dealing' ? 'Your cards will fly in here…' : P(App.me)?.place ? `Out of cards: ${ORD(P(App.me).place)} place` : 'No cards'}</div>`;
   return hand.map((c) => {
     const ok = drawnOnly != null ? c.id === drawnOnly : myTurn && canPlay(c, v.top, v.color);
     const cls = [ok ? 'ok' : '', App.ui.sel === c.id ? 'sel' : '', App.hidden.has(c.id) || (App.flung && App.flung.id === c.id) ? 'hid' : ''].join(' ');
@@ -1178,20 +1231,21 @@ function rResults(v) {
   const handOf = (id) => (lr ? lr.hands.find((h) => h.id === id) : null);
   return `<div class="game">${topbar(v, over ? 'Game over' : `Round ${v.round} finished`)}
     <div class="scroll">
-      <div class="winner">${w ? avHTML(w.id, w.emoji, 'big') : '<div class="big">🏆</div>'}
+      <div class="winner">${w ? avHTML(w.id, w.emoji, 'big') : '<div class="big"></div>'}
         <h2>${esc(winId === App.me ? 'You win' : (w?.name || '') + ' wins')}${over ? ' the game!' : ' the round!'}</h2>
-        <div class="small">${lr && !over ? `+${lr.pts} points from everyone's leftover cards` : over && target ? `First to ${target} points` : lr ? `+${lr.pts} points` : ''}</div></div>
+        <div class="small">${lr && lr.places && lr.places.length > 1 ? lr.places.map((id, i) => `${ORD(i + 1)} ${esc(nameOf(id))} +${lr.gains[id]}`).join(' · ') : lr ? `+${lr.pts} points from the cards left in other hands` : ''}${over && target ? `<br>First to ${target} points` : ''}</div></div>
       ${ranked.map((p) => {
         const h = handOf(p.id);
         return `<div class="res ${p.id === winId ? 'win' : ''}">${avHTML(p.id, p.emoji, 'em')}<div class="info"><b>${esc(p.id === App.me ? 'You' : p.name)}</b>
-          ${h && h.cards.length ? `<div class="cards">${sortHand(h.cards).map((c) => cardHTML(c, 'tiny')).join('')}</div><div class="small">${h.pts} pts in hand</div>` : h ? '<div class="small">Out of cards 🎉</div>' : ''}
+          ${h && h.place ? `<div class="small"><span class="placeb inline">${ORD(h.place)}</span> out of cards · +${h.gain} points</div>` : ''}
+          ${h && h.cards.length ? `<div class="cards">${sortHand(h.cards).map((c) => cardHTML(c, 'tiny')).join('')}</div><div class="small">${h.pts} pts left in hand</div>` : ''}
           ${target ? `<div class="bar"><i style="width:${Math.min(100, (p.score / target) * 100)}%"></i></div>` : ''}</div>
           <div class="sc">${p.score}<small>points</small></div></div>`;
       }).join('')}
     </div>
     <div class="sticky-bottom">${host
-      ? (over ? '<button class="btn primary block big" data-act="start">🔁 Play again</button><button class="btn ghost block" data-act="toLobby">Back to lobby (let people join)</button>'
-        : '<button class="btn primary block big" data-act="start">🃏 Next round: shuffle & deal</button>')
+      ? (over ? '<button class="btn primary block big" data-act="start">Play again</button><button class="btn ghost block" data-act="toLobby">Back to lobby (let people join)</button>'
+        : '<button class="btn primary block big" data-act="start">Next round: shuffle & deal</button>')
       : `<div class="center-t small" style="padding:12px">${over ? 'Waiting for the host…' : 'Waiting for the host to deal the next round…'}</div>`}</div>
   </div>`;
 }
@@ -1222,8 +1276,8 @@ function challengeSheet(v) {
   openModal(`<div class="title">${esc(nameOf(by))} played Wild +4 on you!</div>
     <div class="sub">A Wild +4 is only allowed when the player has no card of the colour that was in play.<br>
     <b>Accept</b>: draw 4 and miss your turn.<br><b>Challenge</b>: if they cheated, they draw 4 instead. If they didn't, you draw 6 and miss your turn.</div>
-    <button class="btn primary block big" data-act="accept4">😩 Accept, draw 4</button>
-    <button class="btn block big" style="background:#e0115f" data-act="challenge4">⚖️ Challenge!</button>`, 'challenge');
+    <button class="btn primary block big" data-act="accept4">Accept, draw 4</button>
+    <button class="btn block big" style="background:#e0115f" data-act="challenge4">Challenge!</button>`, 'challenge');
 }
 function rulesHTML() {
   return `<div class="title">How to play SATU!</div><div class="rules">
@@ -1231,7 +1285,7 @@ function rulesHTML() {
     <h4>Your turn</h4><ul><li>Play a card that matches the pile by <b>colour</b>, <b>number</b> or <b>symbol</b>, or play a <b>Wild</b>.</li><li>Can't (or don't want to) play? <b>Draw</b> one card. If it matches you may play it right away, otherwise your turn ends.</li></ul>
     <h4>Action cards</h4><ul><li><b>⊘ Skip</b>: the next player misses a turn.</li><li><b>⇄ Reverse</b>: the direction flips. With 2 players it works like Skip.</li><li><b>+2</b>: the next player draws 2 and misses a turn.</li><li><b>Wild</b>: choose the colour.</li><li><b>Wild +4</b>: choose the colour, the next player draws 4 and misses a turn. Only allowed if you have no card of the current colour. The next player may <b>challenge</b>: if you cheated you draw 4, if not they draw 6.</li></ul>
     <h4>SATU!</h4><ul><li>When you're down to your last card, tap <b>SATU!</b> (before or right after playing your second-last card).</li><li>Forget, and anyone can tap <b>Catch</b> before the next player moves: you draw 2.</li></ul>
-    <h4>Scoring</h4><ul><li>First player out of cards wins the round and scores everyone's leftover cards: numbers = face value, Skip / Reverse / +2 = 20, Wilds = 50.</li><li>First to the target (200 or 500) wins, or play a single round.</li></ul>
+    <h4>Scoring</h4><ul><li>The host chooses when a round ends: after the 1st, 2nd or 3rd player is out of cards, or when only one player is left. Players who are out sit and watch.</li><li>The cards still in hands are worth points: numbers = face value, Skip / Reverse / +2 = 20, Wilds = 50. 1st place scores all of it, 2nd half, 3rd a quarter.</li><li>First to the target (200 or 500) wins, or play a single round.</li></ul>
     <h4>First card</h4><ul><li>Skip: the first player is skipped. Reverse: the dealer starts and play goes the other way. +2: the first player draws 2 and is skipped. Wild: the first player chooses the colour. A Wild +4 is put back.</li></ul>
     </div><button class="btn primary block" data-act="closeModal">Got it</button>`;
 }
@@ -1241,12 +1295,12 @@ function menuSheet() {
   const inGame = v && (v.phase === 'play' || v.phase === 'dealing');
   const cur = v && v.phase === 'play' ? (v.pending && (v.pending.type === 'challenge' || v.pending.type === 'color') ? v.pending.pid : v.turn) : null;
   openModal(`<div class="title">Menu</div><div class="menu-list">
-    <button class="btn block" data-act="rules">📖 Rules</button>
-    <button class="btn block" data-act="testSound">🔊 Test sound</button>
-    ${host && v && v.phase !== 'lobby' ? `<button class="btn block" data-act="share">📤 Invite link</button>` : ''}
-    ${host && cur && cur !== App.me ? `<button class="btn block" data-act="skipTurn">⏭ Skip ${esc(nameOf(cur))}'s turn (draws 1)</button>` : ''}
-    ${host && inGame ? '<button class="btn block" data-act="endGame">🏁 End game now</button>' : ''}
-    ${host ? '<button class="btn block" style="color:#ff8a8a" data-act="closeTable">✖ Close table for everyone</button>' : '<button class="btn block" style="color:#ff8a8a" data-act="leave">🚪 Leave table</button>'}
+    <button class="btn block" data-act="rules">${ico('book')} Rules</button>
+    <button class="btn block" data-act="testSound">${ico('sound')} Test sound</button>
+    ${host && v && v.phase !== 'lobby' ? `<button class="btn block" data-act="share">${ico('share')} Invite link</button>` : ''}
+    ${host && cur && cur !== App.me ? `<button class="btn block" data-act="skipTurn">Skip ${esc(nameOf(cur))}'s turn (draws 1)</button>` : ''}
+    ${host && inGame ? '<button class="btn block" data-act="endGame">End game now</button>' : ''}
+    ${host ? '<button class="btn block" style="color:#ff8a8a" data-act="closeTable">Close table for everyone</button>' : '<button class="btn block" style="color:#ff8a8a" data-act="leave">Leave table</button>'}
     <button class="btn ghost block" data-act="closeModal">Close</button></div>`);
 }
 
@@ -1282,7 +1336,7 @@ document.addEventListener('click', async (e) => {
   const v = App.view;
   if (!['card', 'closeModal'].includes(a)) sfx.play('click');
   switch (a) {
-    case 'emoji': readProfile(); App.profile.emoji = t.dataset.e; App.profile.photo = null; store.set('profile', App.profile); publishPhoto(); render(); break;
+    case 'emoji': readProfile(); App.profile.emoji = t.dataset.e; store.set('profile', App.profile); render(); break;
     case 'pickCamera': readProfile(); $('#camPick').click(); break;
     case 'pickGallery': readProfile(); $('#filePick').click(); break;
     case 'clearPhoto': readProfile(); App.profile.photo = null; store.set('profile', App.profile); publishPhoto(); render(); break;
@@ -1347,8 +1401,11 @@ document.addEventListener('click', async (e) => {
     case 'copy': navigator.clipboard?.writeText(inviteLink()).then(() => toast('Invite link copied.'), () => toast(inviteLink())); break;
     case 'kick': act({ type: 'kick', target: t.dataset.id }); break;
     case 'move': act({ type: 'move', target: t.dataset.id, dir: Number(t.dataset.d) }); break;
+    case 'shape': act({ type: 'settings', patch: { shape: t.dataset.v } }); break;
+    case 'arrReset': act({ type: 'arrange', seats: arrangeDefault(v) }); break;
     case 'addBot': addBot(); break;
     case 'target': act({ type: 'settings', patch: { target: Number(t.dataset.v) } }); break;
+    case 'winners': act({ type: 'settings', patch: { winners: Number(t.dataset.v) } }); break;
     case 'handSize': act({ type: 'settings', patch: { handSize: Number(t.dataset.v) } }); break;
     case 'start': act({ type: 'start' }); break;
     case 'toLobby': act({ type: 'lobby' }); break;
@@ -1404,7 +1461,10 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('input', (e) => {
   if (e.target.id === 'codeIn') e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
-  if (e.target.id === 'nameIn') { App.profile.name = e.target.value.trim().slice(0, 16); store.set('profile', App.profile); }
+  if (e.target.id === 'nameIn') {
+    App.profile.name = e.target.value.trim().slice(0, 16); store.set('profile', App.profile);
+    const m = $('.me-av.ini'); if (m) m.textContent = (App.profile.name[0] || '?').toUpperCase();
+  }
 });
 // the hand keeps its "my turn" look after every full render
 new MutationObserver(() => {
@@ -1524,6 +1584,34 @@ function endGesture(e, cancelled) {
 }
 document.addEventListener('pointerup', (e) => endGesture(e, false));
 document.addEventListener('pointercancel', (e) => endGesture(e, true));
+// host drags people around the virtual table to match the real one
+document.addEventListener('pointerdown', (e) => {
+  const seat = e.target.closest('.arranger.host .arr-seat');
+  const v = App.view;
+  if (!seat || !v || App.mode !== 'host') return;
+  const box = $('#arranger').getBoundingClientRect();
+  const cur = v.settings.seats && v.players.every((p) => v.settings.seats[p.id]) ? v.settings.seats : arrangeDefault(v);
+  App.arrDrag = { pid: seat.dataset.pid, seats: JSON.parse(JSON.stringify(cur)), box };
+  seat.classList.add('drag');
+  e.preventDefault();
+});
+document.addEventListener('pointermove', (e) => {
+  const d = App.arrDrag;
+  if (!d) return;
+  const x = Math.max(0.04, Math.min(0.96, (e.clientX - d.box.left) / d.box.width));
+  const y = Math.max(0.05, Math.min(0.95, (e.clientY - d.box.top) / d.box.height));
+  d.seats[d.pid] = [x, y];
+  const el = document.querySelector(`.arr-seat[data-pid="${CSS.escape(d.pid)}"]`);
+  if (el) { el.style.left = x * 100 + '%'; el.style.top = y * 100 + '%'; el.classList.add('drag'); }
+});
+document.addEventListener('pointerup', () => {
+  const d = App.arrDrag;
+  if (!d) return;
+  App.arrDrag = null;
+  sfx.play('click'); vibrate(10);
+  act({ type: 'arrange', seats: d.seats });
+});
+
 // holding the deck streams cards to the chosen player (brrrr) and stops when their hand is full
 function startHoldDeal(g) {
   const v = App.view;
@@ -1572,9 +1660,9 @@ function micWanted(v) {
 }
 // First time someone hosts or joins: explain the mic, ask for it, and let them test saying "satu".
 function micSheet() {
-  openModal(`<div class="title">🎙 Turn on your microphone</div>
+  openModal(`<div class="title">Turn on your microphone</div>
     <div class="sub">In SATU! you must <b>say "SATU!" out loud</b> when you're down to your <b>last card</b>. The mic only switches on at that moment, to hear you say it.</div>
-    <button class="btn primary block big" data-act="micAllow">🎙 Allow microphone</button>
+    <button class="btn primary block big" data-act="micAllow">${ico('mic')} Allow microphone</button>
     <div id="micStatus" class="micstatus"></div>
     <div id="micNext"></div>
     <button class="btn ghost block" data-act="micSkip">Skip: use a SATU! button instead</button>`, 'mic');
@@ -1585,9 +1673,9 @@ function micGuide(kind) {
     ? (ios ? '<li>Open <b>Settings → General → Keyboard</b> and turn on <b>Enable Dictation</b>.</li><li>Open <b>Settings → Siri</b> and make sure Siri / dictation is allowed.</li><li>Come back here and tap <b>Try again</b>.</li>'
       : '<li>Use <b>Chrome</b> (it has speech recognition built in).</li><li>Make sure Google / the Google app is allowed to use the microphone.</li><li>Tap <b>Try again</b>.</li>')
     : (ios ? '<li>Tap <b>aA</b> on the left of the address bar.</li><li>Tap <b>Website Settings → Microphone → Allow</b>.</li><li>Also check <b>Settings → Safari → Microphone → Allow</b>.</li><li>Tap <b>Try again</b>.</li>'
-      : '<li>Tap the <b>🔒</b> (or <b>ⓘ</b>) on the left of the address bar.</li><li>Tap <b>Permissions → Microphone → Allow</b>.</li><li>If Chrome itself has no mic access: <b>Phone Settings → Apps → Chrome → Permissions → Microphone → Allow</b>.</li><li>Tap <b>Try again</b>.</li>');
-  $('#micStatus').innerHTML = `<div class="bad">❌ ${kind === 'speech' ? 'The microphone works, but this phone can\'t recognise speech yet.' : 'The microphone is blocked.'}</div><ol class="guide">${steps}</ol>`;
-  $('#micNext').innerHTML = '<button class="btn blue block" data-act="micAllow">🔁 Try again</button>';
+      : '<li>Tap the <b>lock</b> (or <b>ⓘ</b>) icon on the left of the address bar.</li><li>Tap <b>Permissions → Microphone → Allow</b>.</li><li>If Chrome itself has no mic access: <b>Phone Settings → Apps → Chrome → Permissions → Microphone → Allow</b>.</li><li>Tap <b>Try again</b>.</li>');
+  $('#micStatus').innerHTML = `<div class="bad">${kind === 'speech' ? 'The microphone works, but this phone can\'t recognise speech yet.' : 'The microphone is blocked.'}</div><ol class="guide">${steps}</ol>`;
+  $('#micNext').innerHTML = '<button class="btn blue block" data-act="micAllow">Try again</button>';
 }
 let micTest = null;
 function micTestStop() { try { micTest && micTest.abort(); } catch (_) {} micTest = null; }
@@ -1605,12 +1693,12 @@ async function micAllow() {
   Mic.denied = false;
   store.set('mic', 'ok');
   if (!SR) {
-    st.innerHTML = '✅ Microphone allowed, but this browser can\'t recognise speech. You\'ll get a <b>SATU!</b> button instead.';
+    st.innerHTML = 'Microphone allowed, but this browser can\'t recognise speech. You\'ll get a <b>SATU!</b> button instead.';
     Mic.denied = true; store.set('mic', 'button');
     $('#micNext').innerHTML = '<button class="btn primary block" data-act="micContinue">Continue</button>';
     return;
   }
-  st.innerHTML = '✅ Microphone on! Now say <b>"SATU!"</b> to test it… <div class="heardtest"></div>';
+  st.innerHTML = 'Microphone on! Now say <b>"SATU!"</b> to test it… <div class="heardtest"></div>';
   $('#micNext').innerHTML = '<button class="btn primary block" data-act="micContinue">Continue</button>';
   try {
     const r = new SR();
@@ -1619,7 +1707,7 @@ async function micAllow() {
       for (let i = ev.resultIndex; i < ev.results.length; i++) for (let k = 0; k < ev.results[i].length; k++) {
         const t = ev.results[i][k].transcript || '';
         const h = $('.heardtest'); if (h && k === 0) h.textContent = '“' + t.slice(-30) + '”';
-        if (SATU_RE.test(t)) { st.innerHTML = '🎉 Heard you say <b>SATU!</b> Your mic is ready.'; sfx.play('satu'); micTestStop(); return; }
+        if (SATU_RE.test(t)) { st.innerHTML = 'Heard you say <b>SATU!</b> Your mic is ready.'; sfx.play('satu'); micTestStop(); return; }
       }
     };
     r.onerror = (ev) => { if (['not-allowed', 'service-not-allowed'].includes(ev.error)) { micGuide('speech'); store.del('mic'); } };
@@ -1668,12 +1756,36 @@ function heardSatu() {
 }
 
 // ======================================================================
+// INTRO — plays whenever someone opens the game (also straight after scanning the QR code)
+// ======================================================================
+function showSplash() {
+  const fan = [{ c: 'r', v: '7' }, { c: 'y', v: 's' }, { c: 'w', v: 'w4' }, { c: 'g', v: 'r' }, { c: 'b', v: '1' }];
+  const el = document.createElement('div');
+  el.id = 'splash';
+  el.innerHTML = `<div class="sp-in">
+    <div class="sp-fan">${fan.map((c, i) => `<div class="sp-c" style="--i:${i};--r:${(i - 2) * 15}deg;--x:${(i - 2) * 26}px">${cardHTML({ id: 950 + i, ...c })}</div>`).join('')}</div>
+    <div class="sp-title">${[...'SATU!'].map((ch, i) => `<span style="--i:${i}">${ch}</span>`).join('')}</div>
+    <div class="sp-beta">BETA</div>
+    <div class="sp-by">made by <b>mnm</b></div>
+    <div class="sp-tap">tap to start</div></div>`;
+  document.body.appendChild(el);
+  const go = () => {
+    if (!el.isConnected || el.classList.contains('out')) return;
+    sfx.unlock(); sfx.play('shuffle', { small: true });
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 500);
+  };
+  el.addEventListener('pointerup', go);
+  setTimeout(go, 3600);
+}
+
+// ======================================================================
 // start
 // ======================================================================
 function route() {
   const join = (params.get('join') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (join.length === 5 && params.has('auto') && params.get('name')) { // test bench players join by themselves
-    App.profile = { name: params.get('name').slice(0, 16), emoji: params.get('emoji') || EMOJIS[Math.floor(Math.random() * EMOJIS.length)] };
+    App.profile = { name: params.get('name').slice(0, 16), emoji: /^c\d$/.test(params.get('emoji') || '') ? params.get('emoji') : EMOJIS[Math.floor(Math.random() * EMOJIS.length)] };
     clientJoin(join).catch(() => teardown());
     return;
   }
@@ -1697,3 +1809,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   });
 }
 route();
+if (!params.has('auto') && window.top === window) showSplash();

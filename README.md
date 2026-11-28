@@ -8,14 +8,16 @@ A colour-matching card party game for 2–10 players in the same room. Each play
 
 ## How a game runs
 
-1. **Table.** The host taps *Host a table*. Players join with the QR code, the invite link or the code, then pick a name and **take a selfie, choose a photo from the gallery, or pick an emoji**. Under **Seats** the host uses ▲▼ to put everyone in the order they really sit, going to the left (clockwise), with a little table picture, so the virtual table matches the real one and turns go round in the right order. The host chooses *Play to* (1 round / 200 / 500 points) and *Cards each* (5 / 7 / 10).
+1. **Table.** The host taps *Host a table*. Players join with the QR code, the invite link or the code, then pick a name and **take a selfie or choose a gallery photo** (no photo = your initial on a colour you pick). Under **Seats** the host **drags everyone to where they really sit** on a little table (round or long, like TIPU!); turns go clockwise from those seats and every phone's table matches the real one. The host chooses *Play to* (1 round / 200 / 500 points), *Round ends* (after the 1st / 2nd / 3rd player is out, or when only one is left) and *Cards each* (5 / 7 / 10).
+
+Opening the game (or scanning the QR code) plays the SATU! intro: cards deal into a fan, the title stamps in, **BETA**, *made by mnm*. Tap to skip.
 2. **Shuffle & deal.** The host taps *Shuffle & deal*. Every phone hears the riffle and the host's phone turns into **one big full-screen deck**. Cards are dealt **one player at a time**: the whole hand to the player after the host, then the next, and so on round the table, **the host last**. For each player the two phones go **head to head** (top edge to top edge) and the host either:
    - **flicks ↑** one card at a time, or
    - **holds the deck**: *brrrr*, the cards stream across one by one until that player's hand is full, then it stops and moves to the next player.
 
    Each card shoots off the top of the host's phone with a *trrr*. **On the player's phone it lands full screen, face down; they tap it, it flips over, drops into their hand and the table comes back.** Cards that arrive quickly wait in a pile (*+6 more waiting*, *Flip all*). The host can tap a player at the top to change who's next. **⚡ Auto deal** gives everyone their whole hand at once, no animation.
 3. **Play.** Your cards are laid out side by side (two or three rows when the hand is big), never on top of each other. **Press and hold** a card to pop it out of your hand, then **flick it up onto the pile**, like throwing it on the table (tapping twice also works). Tap the deck to draw. The table shows every player around it, card counts, whose turn it is, the direction of play, the pile and the colour in play. Every card played flies from that player's seat onto the pile on every phone, so everyone sees who played what. The line under the table says what just happened.
-4. **Round end.** First player out of cards wins the round and scores everyone's leftover cards. Hands are revealed. The host deals the next round (the dealer chip moves one seat).
+4. **Round end.** A player who plays their last card is **out** and takes a place (1st, 2nd…); the others keep playing and turns skip them. The round ends when the host's *Round ends* setting is reached (classic: the 1st player out). Hands are revealed. The host deals the next round (the dealer chip moves one seat).
 
 ## Rules (classic)
 
@@ -24,7 +26,16 @@ A colour-matching card party game for 2–10 players in the same room. Each play
 - **Skip** ⊘: next player misses a turn. **Reverse** ⇄: direction flips; with 2 players it acts like Skip. **+2**: next player draws 2 and misses a turn. **Wild**: choose the colour. **Wild +4**: choose the colour, next player draws 4 and misses a turn.
 - **Wild +4 challenge:** a +4 is only allowed if you hold no card of the colour in play. The victim may challenge. Guilty: the player who played it draws 4 and the challenger plays normally. Innocent: the challenger draws 6 and misses their turn.
 - **SATU!** When you're down to your **last card** **the microphone opens and you have to say "SATU!" out loud**. The phone listens (Malay speech recognition; "satu", "1" or "one" count). You get 4 seconds of grace, then anyone can tap *Catch* before the next player moves, and you draw 2. If the phone has no speech recognition or the mic is blocked, a SATU! button appears instead.
-- **Scoring:** numbers = face value, Skip / Reverse / +2 = 20, Wild / Wild +4 = 50. First to the target wins.
+- **Scoring:** numbers = face value, Skip / Reverse / +2 = 20, Wild / Wild +4 = 50. The cards still in hands when the round ends are the pot: **1st place scores all of it, 2nd half, 3rd a quarter** (and so on). First to the target wins.
+
+### Rules decided (not in the classic rules)
+
+| Question | Decision |
+|---|---|
+| Round goes on after the first winner | Host setting *Round ends*: after 1st (classic) / 2nd / 3rd out, or last one left. Players who are out are skipped. |
+| How several winners score | Pot = points left in hands at the end. 1st 100%, 2nd 50%, 3rd 25%, halving each place. |
+| Going out on a +2 / +4 while the round continues | The next player still draws and is skipped; no challenge on a last-card +4. |
+| Reverse when only two players are left | Acts like Skip (you play again), as with two players. |
 - **First card:** a Wild +4 is put back. Skip skips the first player, Reverse lets the dealer start the other way, +2 makes the first player draw 2 and miss a turn, a Wild lets the first player pick the colour.
 - No stacking of +2/+4 (official rule). If the winning card is a +2 or +4, the next player still draws before scoring.
 

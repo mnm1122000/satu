@@ -1,6 +1,6 @@
 // SATU! service worker. Code (html/js/css) is always revalidated so phones never run an old
 // version; images/vendor files are cached. Bump CACHE when assets change.
-const CACHE = 'satu-assets-v4';
+const CACHE = 'satu-assets-v5';
 self.addEventListener('install', () => { self.skipWaiting(); });
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));

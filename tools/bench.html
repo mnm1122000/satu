@@ -37,7 +37,7 @@
 </header>
 <main>
   <div class="slot">
-    <div class="tag host">👑 YOU (host)</div>
+    <div class="tag host">YOU (host)</div>
     <div class="phone"><iframe id="host" src="../index.html?slot=bench_host" allow="microphone; autoplay"></iframe></div>
   </div>
   <div id="players"></div>
@@ -47,14 +47,15 @@ if (location.protocol === 'file:') {
   document.body.innerHTML = '<div style="padding:30px;font:16px/1.6 sans-serif;color:#fff;max-width:640px">'
     + '<h2 style="color:#ffd84d">Open the bench through a web address</h2>'
     + '<p>Browsers block this page when it is opened as a file. Use one of these:</p>'
-    + '<p>🌐 Online: <a style="color:#6fd3ff" href="https://mnm1122000.github.io/satu/tools/bench.html">https://mnm1122000.github.io/satu/tools/bench.html</a></p>'
-    + '<p>💻 Local: run <code>node tools/serve.cjs 5191</code> then open <a style="color:#6fd3ff" href="http://localhost:5191/tools/bench.html">http://localhost:5191/tools/bench.html</a></p></div>';
+    + '<p>Online: <a style="color:#6fd3ff" href="https://mnm1122000.github.io/satu/tools/bench.html">https://mnm1122000.github.io/satu/tools/bench.html</a></p>'
+    + '<p>Local: run <code>node tools/serve.cjs 5191</code> then open <a style="color:#6fd3ff" href="http://localhost:5191/tools/bench.html">http://localhost:5191/tools/bench.html</a></p></div>';
   throw new Error('bench needs http(s)');
 }
 // The bench opens the real game in phone-sized frames. You drive the host phone.
 // When your table code appears, the player phones join on their own (?auto=1).
 const NAMES = ['Aina', 'Bob', 'Chloe', 'Dina', 'Eiman', 'Farah'];
-const EMO = ['🦊', '🐼', '🐯', '🐸', '🦄', '🐙'];
+const EMO = ['c0', 'c5', 'c3', 'c2', 'c6', 'c4'];
+const COL = ['#ef3b36', '#1e7bff', '#1fb35b', '#ffc21a', '#7c4dff', '#14b8a6'];
 const $ = (s) => document.querySelector(s);
 const hostDoc = () => $('#host').contentDocument;
 let joinedCode = null;
@@ -66,7 +67,7 @@ function makePlayers(code) {
   for (let i = 0; i < n; i++) {
     const slot = document.createElement('div');
     slot.className = 'slot';
-    slot.innerHTML = `<div class="tag">${EMO[i]} ${NAMES[i]}</div><div class="phone mini"><iframe allow="microphone; autoplay" src="../index.html?join=${code}&slot=bench_p${i}&auto=1&name=${NAMES[i]}&emoji=${encodeURIComponent(EMO[i])}"></iframe></div>`;
+    slot.innerHTML = `<div class="tag"><i style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${COL[i]};margin-right:6px"></i>${NAMES[i]}</div><div class="phone mini"><iframe allow="microphone; autoplay" src="../index.html?join=${code}&slot=bench_p${i}&auto=1&name=${NAMES[i]}&emoji=${encodeURIComponent(EMO[i])}"></iframe></div>`;
     box.appendChild(slot);
   }
   $('#status').textContent = `Table ${code}: ${n} players joining… then tap “Shuffle & deal” on your phone.`;

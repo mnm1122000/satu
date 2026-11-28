@@ -171,6 +171,45 @@ for (const [mode, illegal] of [['accept', false], ['guilty', true], ['innocent',
   ok(order.join() === 'p1,p3,p2,p0', 'deals each player in full, in seat order, host last: ' + order.join());
 }
 
+// dragging seats on the virtual table sets the turn order (clockwise)
+{
+  const g = Game.create('T', { id: 'p0', name: 'H' });
+  for (let i = 1; i < 4; i++) g.addPlayer({ id: 'p' + i, name: 'P' + i });
+  // p0 bottom, p2 left, p1 top, p3 right  → clockwise from the left: p2, p1, p3, p0
+  g.handle('p0', { type: 'arrange', seats: { p0: [0.5, 0.9], p1: [0.5, 0.1], p2: [0.1, 0.5], p3: [0.9, 0.5] } });
+  const ids = g.s.players.map((p) => p.id), k = ids.indexOf('p0');
+  ok([...ids.slice(k), ...ids.slice(0, k)].join() === 'p0,p2,p1,p3', 'seats order players clockwise: ' + ids.join());
+  ok(!g.handle('p1', { type: 'arrange', seats: {} }).ok, 'only the host arranges');
+}
+
+// the round keeps going after the first winner
+{
+  const g = setup(4);
+  g.s.settings.winners = 2; g.s.settings.target = 500;
+  rig(g, { hands: [[C('r', '1')], [C('r', '2'), C('b', '9')], [C('r', '3'), C('g', '5')], [C('r', '4'), C('y', 'd2')]], top: C('r', '5') });
+  g.handle('p0', { type: 'play', card: g.s.players[0].hand[0].id });
+  ok(g.s.phase === 'play' && g.s.players[0].place === 1 && g.s.turn === 1, '1st winner: round goes on');
+  g.handle('p1', { type: 'shout' });
+  g.handle('p1', { type: 'play', card: g.s.players[1].hand[0].id });
+  g.handle('p2', { type: 'play', card: g.s.players[2].hand[0].id });
+  g.handle('p3', { type: 'play', card: g.s.players[3].hand[0].id });
+  ok(g.s.turn === 1, 'turns skip players who are out');
+  g.handle('p1', { type: 'play', card: g.s.players[1].hand[0].id }).ok || g.handle('p1', { type: 'draw' });
+  // force p1 out
+  rig(g, { hands: [[], [C('r', '7')], [C('g', '5')], [C('y', 'd2')]], top: C('r', '5'), turn: 1 });
+  g.s.players[0].place = 1;
+  g.handle('p1', { type: 'play', card: g.s.players[1].hand[0].id });
+  // pool = 5 (green 5) + 20 (+2) = 25 → 1st 25, 2nd 12
+  ok(g.s.phase === 'roundover' && g.s.players[1].place === 2 && g.s.lastRound.gains.p0 === 25 && g.s.lastRound.gains.p1 === 12, 'round ends at the 2nd winner, places scored 100% / 50%');
+}
+{
+  const g = setup(3);
+  g.s.settings.winners = 0; g.s.settings.target = 0;
+  rig(g, { hands: [[C('r', 'd2')], [C('b', '1'), C('b', '2')], [C('g', '3')]], top: C('r', '5') });
+  g.handle('p0', { type: 'play', card: g.s.players[0].hand[0].id });
+  ok(g.s.phase === 'play' && g.s.players[1].hand.length === 4 && g.s.turn === 2, 'going out on +2 (round continues): next draws 2 and is skipped');
+}
+
 // random full games
 function bot(g) {
   const s = g.s, c = s.players[s.turn];
@@ -191,6 +230,7 @@ for (let n = 2; n <= 10; n++) {
   for (let k = 0; k < 40; k++) {
     const g = setup(n);
     g.s.settings.target = 200;
+    g.s.settings.winners = [1, 2, 3, 0][k % 4];
     let steps = 0;
     while (g.s.phase !== 'over' && steps < 20000) {
       if (g.s.phase === 'roundover') { g.handle('p0', { type: 'start' }); let t = 1e6 + steps * 1000; while (g.s.phase === 'dealing') g.handle('p0', { type: 'deal' }, (t += 1000)); }

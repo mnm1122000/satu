@@ -8,6 +8,9 @@ export const COLOR_NAME = { r: 'Red', y: 'Yellow', g: 'Green', b: 'Blue', w: 'Wi
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 export const TARGETS = [0, 200, 500];
+// how many players must go out before the round ends: 1 = classic, 0 = keep going until one player is left
+export const WINNERS = [1, 2, 3, 0];
+export const placeShare = (place) => 1 / 2 ** (place - 1); // 1st 100%, 2nd 50%, 3rd 25% … of the leftover points
 export const HAND_SIZES = [5, 7, 10];
 export const CATCH_GRACE = 4000; // ms a player gets to say SATU! before they can be caught
 
@@ -58,7 +61,7 @@ export class Game {
   static create(code, host, opts = {}) {
     const s = {
       v: 1, code, hostId: host.id, phase: 'lobby', round: 0,
-      settings: { target: 500, handSize: 7 },
+      settings: { target: 500, handSize: 7, winners: 1 },
       minPlayers: opts.minPlayers ?? MIN_PLAYERS,
       players: [], deck: [], discard: [], color: null, dir: 1, turn: 0, dealer: -1,
       deal: null, pending: null, vulnerable: null, log: [], winner: null, champion: null, lastRound: null,
@@ -73,9 +76,20 @@ export class Game {
   idx(id) { return this.s.players.findIndex((p) => p.id === id); }
   get top() { return this.s.discard[this.s.discard.length - 1] || null; }
   cur() { return this.s.players[this.s.turn]; }
+  // k seats along the direction of play, stepping over players who already went out this round
   next(k = 1, from = this.s.turn) {
-    const n = this.s.players.length;
-    return (((from + this.s.dir * k) % n) + n) % n;
+    const s = this.s, n = s.players.length;
+    let i = from;
+    for (let step = 0; step < k; step++) {
+      let guard = 0;
+      do { i = (((i + s.dir) % n) + n) % n; } while (s.players[i].place && ++guard < n);
+    }
+    return i;
+  }
+  active() { return this.s.players.filter((p) => !p.place); }
+  winnersNeeded() {
+    const s = this.s, n = s.players.length, w = s.settings.winners ?? 1;
+    return w === 0 ? n - 1 : Math.min(w, n - 1);
   }
   emit(e) { this.events.push(e); }
   drainEvents() { const e = this.events; this.events = []; return e; }
@@ -100,6 +114,17 @@ export class Game {
     s.players.push({ id, name: nm, emoji: String(emoji || '🙂').slice(0, 8), bot: !!bot, hand: [], score: 0, called: false });
     if (s.players.length > 1) this.log(`${nm} joined the table`);
     return { ok: true };
+  }
+
+  // put s.players in clockwise order of their seats on the virtual table (screen coords: y grows down)
+  orderBySeats() {
+    const s = this.s, seats = s.settings.seats || {};
+    const placed = s.players.filter((q) => seats[q.id]);
+    if (placed.length < 2) return;
+    const ang = (q) => { const [x, y] = seats[q.id]; return Math.atan2(y - 0.5, x - 0.5); };
+    const sorted = placed.slice().sort((a, b) => ang(a) - ang(b));
+    const rest = s.players.filter((q) => !seats[q.id]);
+    s.players = [...sorted, ...rest];
   }
 
   removePlayer(id) {
@@ -146,7 +171,7 @@ export class Game {
     s.deck = shuffle(buildDeck());
     s.discard = []; s.color = null; s.dir = 1; s.turn = (s.dealer + 1) % n;
     s.pending = null; s.vulnerable = null; s.winner = null; s.lastRound = null;
-    for (const p of s.players) { p.hand = []; p.called = false; }
+    for (const p of s.players) { p.hand = []; p.called = false; p.place = 0; }
     s.phase = 'dealing';
     // one player at a time: fill the player after the host first, the host (the dealer) gets theirs last
     s.deal = { left: s.settings.handSize * n, total: s.settings.handSize * n, pos: (Math.max(0, this.idx(s.hostId)) + 1) % n, at: 0, auto: false, speed: 420, mode: 'phone' };
@@ -245,25 +270,42 @@ export class Game {
     if (this.s.vulnerable && this.s.vulnerable !== actor) this.s.vulnerable = null;
   }
 
-  endRound(pid) {
+  // The round is over: everyone who went out scores a share of the cards still in the other hands
+  // (1st place all of it, 2nd half, 3rd a quarter…).
+  endRound() {
     const s = this.s;
-    const w = this.p(pid);
-    let pts = 0;
-    for (const p of s.players) if (p.id !== pid) pts += p.hand.reduce((a, c) => a + points(c), 0);
-    w.score += pts;
-    s.winner = pid;
+    const finished = s.players.filter((p) => p.place).sort((a, b) => a.place - b.place);
+    let pool = 0;
+    for (const p of s.players) if (!p.place) pool += p.hand.reduce((a, c) => a + points(c), 0);
+    const gains = {};
+    for (const p of finished) { gains[p.id] = Math.floor(pool * placeShare(p.place)); p.score += gains[p.id]; }
+    const first = finished[0];
+    s.winner = first.id;
     s.vulnerable = null;
     s.pending = null;
-    s.lastRound = { winner: pid, pts, hands: s.players.map((p) => ({ id: p.id, cards: p.hand.slice(), pts: p.hand.reduce((a, c) => a + points(c), 0) })) };
-    this.emit({ type: 'round', winner: pid, pts });
-    this.log(`${w.name} wins round ${s.round} (+${pts} points)`);
+    s.lastRound = { winner: first.id, pts: gains[first.id], pool, gains, places: finished.map((p) => p.id),
+      hands: s.players.map((p) => ({ id: p.id, cards: p.hand.slice(), pts: p.hand.reduce((a, c) => a + points(c), 0), place: p.place || 0, gain: gains[p.id] || 0 })) };
+    this.emit({ type: 'round', winner: first.id, pts: gains[first.id] });
+    this.log(`Round ${s.round} over: ${finished.map((p) => `${p.name} +${gains[p.id]}`).join(', ')}`);
     const target = s.settings.target;
-    if (!target || w.score >= target) {
+    const top = [...s.players].sort((a, b) => b.score - a.score)[0];
+    if (!target || top.score >= target) {
       s.phase = 'over';
-      s.champion = target ? [...s.players].sort((a, b) => b.score - a.score)[0].id : pid;
+      s.champion = target ? top.id : first.id;
     } else {
       s.phase = 'roundover';
     }
+  }
+
+  // a player played their last card: they take the next place; the round ends once enough players are out
+  goOut(p) {
+    const s = this.s;
+    p.place = s.players.filter((q) => q.place).length + 1;
+    p.called = false;
+    if (s.vulnerable === p.id) s.vulnerable = null;
+    this.emit({ type: 'out', by: p.id, place: p.place });
+    this.log(`${p.name} is out of cards: place ${p.place}`);
+    return p.place >= this.winnersNeeded() || this.active().length <= 1;
   }
 
   // ---------- actions ----------
@@ -280,15 +322,29 @@ export class Game {
         if (!host || s.phase !== 'lobby') return err('Only the host can change settings.');
         const pt = a.patch || {};
         if (TARGETS.includes(pt.target)) s.settings.target = pt.target;
+        if (WINNERS.includes(pt.winners)) s.settings.winners = pt.winners;
         if (HAND_SIZES.includes(pt.handSize)) s.settings.handSize = pt.handSize;
+        if (['round', 'long'].includes(pt.shape)) s.settings.shape = pt.shape;
         return { ok: true };
       }
       case 'profile':
         if (clean(a.name)) p.name = clean(a.name);
         if (a.emoji) p.emoji = String(a.emoji).slice(0, 8);
         return { ok: true };
+      case 'arrange': { // host drags everyone to where they really sit; turn order follows the seats clockwise
+        if (!host || s.phase !== 'lobby' || !a.seats || typeof a.seats !== 'object') return err('Seats can only change in the lobby.');
+        const seats = {};
+        for (const q of s.players) {
+          const v = a.seats[q.id];
+          if (Array.isArray(v) && v.length === 2 && v.every((x) => typeof x === 'number' && x >= 0 && x <= 1)) seats[q.id] = [+v[0].toFixed(3), +v[1].toFixed(3)];
+        }
+        s.settings.seats = seats;
+        this.orderBySeats();
+        return { ok: true };
+      }
       case 'move': { // host arranges the seats to match the real table
         if (!host || s.phase !== 'lobby') return err('Seats can only change in the lobby.');
+        if (s.settings.seats) s.settings.seats = null;
         const i = this.idx(a.target), j = i + (a.dir < 0 ? -1 : 1);
         if (i < 0 || j < 0 || j >= s.players.length) return { ok: false };
         [s.players[i], s.players[j]] = [s.players[j], s.players[i]];
@@ -374,15 +430,22 @@ export class Game {
         this.log(`${p.name} played ${cardName(card)}${card.c === 'w' ? ` → ${COLOR_NAME[s.color]}` : ''}`);
         if (p.hand.length === 1 && !p.called) { s.vulnerable = pid; s.vulnAt = now; }
 
-        const n = s.players.length;
+        const n = this.active().length;
         if (p.hand.length === 0) {
-          if (card.v === 'd2' || card.v === 'w4') { // the next player still draws before the round is scored
-            const victim = s.players[this.next(1)];
+          const ends = this.goOut(p);
+          if (card.v === 'd2' || card.v === 'w4') { // going out on a +2 / +4: the next player still draws (no challenge) and is skipped
+            const vi = this.next(1);
+            const victim = s.players[vi];
             const k = card.v === 'd2' ? 2 : 4;
             const got = this.drawCards(victim, k);
             this.emit({ type: 'draw', by: victim.id, cards: got, n: got.length, count: this.p(victim.id).hand.length, deck: s.deck.length, reason: card.v });
+            if (!ends) { this.emit({ type: 'skip', target: victim.id, quiet: true }); s.turn = this.next(1, vi); }
+          } else if (!ends) {
+            if (card.v === 's') { const sk = s.players[this.next(1)]; this.emit({ type: 'skip', target: sk.id }); s.turn = this.next(2); }
+            else if (card.v === 'r') { s.dir *= -1; this.emit({ type: 'reverse', dir: s.dir }); s.turn = this.next(1); }
+            else s.turn = this.next(1);
           }
-          this.endRound(pid);
+          if (ends) this.endRound();
           return { ok: true };
         }
         switch (card.v) {
@@ -395,7 +458,7 @@ export class Game {
           case 'r':
             s.dir *= -1;
             this.emit({ type: 'reverse', dir: s.dir });
-            if (n === 2) { // with two players Reverse works like Skip: you go again
+            if (n === 2) { // with two players left, Reverse works like Skip: you go again
               this.emit({ type: 'skip', target: s.players[this.next(1)].id });
             } else s.turn = this.next(1);
             break;
@@ -487,7 +550,7 @@ export class Game {
 
       case 'catch': {
         const t = s.vulnerable && this.p(s.vulnerable);
-        if (s.phase !== 'play' || !t || t.id === pid) return err('Too late!');
+        if (s.phase !== 'play' || !t || t.id === pid || t.place) return err('Too late!');
         if (now - (s.vulnAt || 0) < CATCH_GRACE) return err(`Give ${t.name} a second to say SATU!`);
         s.vulnerable = null;
         const got = this.drawCards(t, 2);
@@ -539,7 +602,8 @@ export class Game {
     const showHands = s.phase === 'roundover' || s.phase === 'over';
     return {
       code: s.code, phase: s.phase, round: s.round, hostId: s.hostId, settings: s.settings, minPlayers: s.minPlayers,
-      players: s.players.map((p) => ({ id: p.id, name: p.name, emoji: p.emoji, count: p.hand.length, score: p.score, called: p.called, bot: p.bot })),
+      players: s.players.map((p) => ({ id: p.id, name: p.name, emoji: p.emoji, count: p.hand.length, score: p.score, called: p.called, bot: p.bot, place: p.place || 0 })),
+      winnersNeeded: this.winnersNeeded(),
       me: { id: pid, hand: me.hand },
       turn: s.phase === 'play' && s.players[s.turn] ? s.players[s.turn].id : null,
       dealer: s.players[s.dealer] ? s.players[s.dealer].id : null,
